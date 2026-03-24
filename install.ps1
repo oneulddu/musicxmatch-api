@@ -10,9 +10,9 @@ Write-Host "[1/5] Creating installation directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 Write-Host "[2/5] Downloading files..." -ForegroundColor Yellow
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/server.js" -OutFile "$InstallDir\server.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/musicxmatch.js" -OutFile "$InstallDir\musicxmatch.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/package.json" -OutFile "$InstallDir\package.json"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/server.js" -OutFile "$InstallDir\server.js"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/musicxmatch.js" -OutFile "$InstallDir\musicxmatch.js"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/package.json" -OutFile "$InstallDir\package.json"
 
 Write-Host "[3/5] Installing dependencies..." -ForegroundColor Yellow
 Set-Location $InstallDir

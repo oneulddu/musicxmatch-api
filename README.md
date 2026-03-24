@@ -17,7 +17,7 @@ MusicXMatch 가사 제공자 애드온 for ivLyrics
 PowerShell에서 실행:
 
 ```powershell
-iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.ps1" | iex
+iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex
 ```
 
 ### macOS / Linux
@@ -25,7 +25,7 @@ iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.
 터미널에서 실행:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
 ## 사용법

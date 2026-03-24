@@ -11,9 +11,9 @@ echo "[1/5] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
 
 echo "[2/5] Downloading files..."
-curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/server.js -o "$INSTALL_DIR/server.js"
-curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/musicxmatch.js -o "$INSTALL_DIR/musicxmatch.js"
-curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/package.json -o "$INSTALL_DIR/package.json"
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/server.js -o "$INSTALL_DIR/server.js"
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/musicxmatch.js -o "$INSTALL_DIR/musicxmatch.js"
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/package.json -o "$INSTALL_DIR/package.json"
 
 echo "[3/5] Installing dependencies..."
 cd "$INSTALL_DIR"
