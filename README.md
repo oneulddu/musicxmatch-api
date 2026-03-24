@@ -2,6 +2,59 @@
 
 Musixmatch is the world's largest catalog of song lyrics and translations. The service is used by millions of people around the world to find lyrics for songs playing around them, to translate lyrics, and to get the facts behind the songs.
 
+## ivLyrics Addon Mode
+
+This repository can now also be used as an `ivLyrics` lyrics provider, similar to the `ivLyrics-Youtube-Caption-Provider` layout.
+
+Included files:
+
+- `Addon_Lyrics_MusicXMatch.js`
+- `manifest.json`
+- `version.json`
+- `server.py`
+
+Quick start:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+musicxmatch-addon-server --host 127.0.0.1 --port 8092
+```
+
+Then point the addon to:
+
+```text
+http://localhost:8092
+```
+
+Server endpoints:
+
+- `GET /health`
+- `GET /lyrics?title=Skyfall&artist=Adele`
+
+The bridge prefers MusicXMatch richsync data when available and falls back to plain lyrics text otherwise.
+
+Install script examples:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.sh | bash
+```
+
+```powershell
+iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.ps1" -OutFile "$env:TEMP\musicxmatch-provider.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\musicxmatch-provider.ps1"
+```
+
+Uninstall script examples:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/uninstall.sh | bash
+```
+
+```powershell
+iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/uninstall.ps1" -OutFile "$env:TEMP\musicxmatch-provider-uninstall.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\musicxmatch-provider-uninstall.ps1"
+```
+
 # What is this?
 
 This is a Python wrapper for the [Musixmatch API](https://developer.musixmatch.com/). It uses the community API key to make requests to the API. These requests have the the same access as a **[Plus](https://developer.musixmatch.com/plans)** plan but for **free**.

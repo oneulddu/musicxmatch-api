@@ -1,0 +1,15 @@
+{
+  "addons": [
+    {
+      "name": "MusicXMatch Provider",
+      "type": "lyrics",
+      "author": "Strvm",
+      "version": "0.1.0",
+      "updated": "2026-03-18",
+      "description": "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/README.md",
+      "downloadUrl": "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js",
+      "githubUrl": "https://github.com/Strvm/musicxmatch-api",
+      "minAppVersion": "3.1.0"
+    }
+  ]
+}
