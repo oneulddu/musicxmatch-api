@@ -3,6 +3,7 @@ use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
@@ -22,6 +23,7 @@ use tower_http::cors::{Any, CorsLayer};
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
+const VERSION_INFO_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
 
 #[derive(Clone)]
 struct AppState {
@@ -60,6 +62,8 @@ struct HealthPayload {
     session_file: String,
     #[serde(rename = "logFile")]
     log_file: String,
+    #[serde(rename = "updateAvailable")]
+    update_available: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -97,6 +101,33 @@ struct ErrorPayload {
     detail: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct VersionInfo {
+    server: String,
+    addon: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateCheckPayload {
+    #[serde(rename = "currentVersion")]
+    current_version: &'static str,
+    #[serde(rename = "latestVersion")]
+    latest_version: String,
+    #[serde(rename = "latestAddonVersion")]
+    latest_addon_version: String,
+    #[serde(rename = "updateAvailable")]
+    update_available: bool,
+    platform: &'static str,
+    command: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateApplyPayload {
+    status: &'static str,
+    platform: &'static str,
+    command: Vec<String>,
+}
+
 #[derive(Clone)]
 struct Logger {
     file: Arc<std::sync::Mutex<Option<std::fs::File>>>,
@@ -122,6 +153,8 @@ async fn main() {
         .route("/health", get(health))
         .route("/lyrics", get(get_lyrics))
         .route("/cache", delete(clear_cache))
+        .route("/update/check", get(update_check))
+        .route("/update/apply", post(update_apply))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state);
 
@@ -207,6 +240,10 @@ fn timestamp_string() -> String {
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log("GET /health");
     let cache_entries = state.cache.lock().await.len();
+    let update_available = latest_version_info()
+        .await
+        .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
+        .unwrap_or(false);
     json_response(StatusCode::OK, HealthPayload {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -216,6 +253,7 @@ async fn health(State(state): State<AppState>) -> Response {
         cache_entries,
         session_file: session_file_path().display().to_string(),
         log_file: log_file_path().display().to_string(),
+        update_available,
     })
 }
 
@@ -292,6 +330,49 @@ async fn get_lyrics(
     }
 }
 
+async fn update_check(State(state): State<AppState>) -> Response {
+    state.logger.log("GET /update/check");
+    match latest_version_info().await {
+        Ok(info) => json_response(
+            StatusCode::OK,
+            UpdateCheckPayload {
+                current_version: env!("CARGO_PKG_VERSION"),
+                latest_version: info.server.clone(),
+                latest_addon_version: info.addon,
+                update_available: compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0,
+                platform: current_platform(),
+                command: update_command_lines(),
+            },
+        ),
+        Err(error) => json_response(
+            StatusCode::BAD_GATEWAY,
+            ErrorPayload {
+                detail: error,
+            },
+        ),
+    }
+}
+
+async fn update_apply(State(state): State<AppState>) -> Response {
+    state.logger.log("POST /update/apply");
+    match spawn_update_process() {
+        Ok(()) => json_response(
+            StatusCode::ACCEPTED,
+            UpdateApplyPayload {
+                status: "scheduled",
+                platform: current_platform(),
+                command: update_command_lines(),
+            },
+        ),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorPayload {
+                detail: error,
+            },
+        ),
+    }
+}
+
 fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
     let mut response = (status, Json(payload)).into_response();
     response.headers_mut().insert(
@@ -299,6 +380,100 @@ fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
         "application/json; charset=utf-8".parse().expect("valid content-type header"),
     );
     response
+}
+
+async fn latest_version_info() -> Result<VersionInfo, String> {
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(VERSION_INFO_URL)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("Latest version lookup failed ({})", response.status()));
+    }
+
+    response.json::<VersionInfo>().await.map_err(|error| error.to_string())
+}
+
+fn compare_versions(left: &str, right: &str) -> i32 {
+    let a = parse_version(left);
+    let b = parse_version(right);
+    let length = a.len().max(b.len());
+    for index in 0..length {
+        let delta = (a.get(index).copied().unwrap_or(0) as i32)
+            - (b.get(index).copied().unwrap_or(0) as i32);
+        if delta != 0 {
+            return delta;
+        }
+    }
+    0
+}
+
+fn parse_version(value: &str) -> Vec<u32> {
+    value
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
+fn current_platform() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "linux"
+    }
+}
+
+fn update_command_lines() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
+            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"".to_string(),
+            "spicetify apply".to_string(),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![
+            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
+            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js".to_string(),
+            "spicetify apply".to_string(),
+        ]
+    }
+}
+
+fn spawn_update_process() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let command = "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex'";
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command])
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let command = "sleep 1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash";
+        Command::new("sh")
+            .args(["-c", &format!("nohup sh -c '{}' >/dev/null 2>&1 &", command)])
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 async fn cached_payload(state: &AppState, key: &str) -> Option<LyricsPayload> {
