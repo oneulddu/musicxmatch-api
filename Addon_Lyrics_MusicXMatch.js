@@ -2,7 +2,7 @@
  * @addon-type  lyrics
  * @id          musicxmatch-provider
  * @name        MusicXMatch Provider
- * @version     0.1.0
+ * @version     0.2.1
  * @author      oneulddu
  */
 
@@ -17,7 +17,7 @@
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
         author: 'oneulddu',
-        version: '0.1.0',
+        version: '0.2.1',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
         },
