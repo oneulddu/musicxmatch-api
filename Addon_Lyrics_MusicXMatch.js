@@ -167,7 +167,7 @@
                     placeholder: DEFAULT_SERVER_URL,
                     onChange: (event) => saveUrl(event.target.value),
                 }),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local Node server and point this addon to it.'),
+                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local lyrics server and point this addon to it.'),
                 React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, `Timeout: ${timeoutSec}s`),
                 React.createElement('input', {
                     type: 'range',
@@ -211,7 +211,16 @@
 
         const serverUrl = getServerUrl();
         const timeout = getTimeoutMs();
+        const spotifyId = typeof info.uri === 'string' && info.uri.startsWith('spotify:track:')
+            ? info.uri.split(':')[2]
+            : '';
         const params = new URLSearchParams({ title, artist });
+        if (spotifyId) {
+            params.set('spotifyId', spotifyId);
+        }
+        if (typeof info.duration === 'number' && Number.isFinite(info.duration) && info.duration > 0) {
+            params.set('durationMs', String(Math.round(info.duration)));
+        }
 
         let response;
         try {

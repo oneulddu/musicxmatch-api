@@ -5,21 +5,21 @@ Write-Host ""
 
 $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $TaskName = "ivLyrics-MusicXMatch"
+$BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 
 Write-Host "[1/5] Creating installation directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-Write-Host "[2/5] Downloading files..." -ForegroundColor Yellow
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/server.js" -OutFile "$InstallDir\server.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/musicxmatch.js" -OutFile "$InstallDir\musicxmatch.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/package.json" -OutFile "$InstallDir\package.json"
+Write-Host "[2/5] Checking Rust toolchain..." -ForegroundColor Yellow
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo is required. Install Rust first: https://rustup.rs"
+}
 
-Write-Host "[3/5] Installing dependencies..." -ForegroundColor Yellow
-Set-Location $InstallDir
-npm install --production
+Write-Host "[3/5] Installing server binary..." -ForegroundColor Yellow
+cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyrics-musicxmatch-server --force
 
 Write-Host "[4/5] Setting up auto-start..." -ForegroundColor Yellow
-$Action = New-ScheduledTaskAction -Execute "node" -Argument "$InstallDir\server.js" -WorkingDirectory $InstallDir
+$Action = New-ScheduledTaskAction -Execute $BinPath -WorkingDirectory $InstallDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
@@ -32,5 +32,3 @@ Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
 Write-Host "Server running at http://localhost:8092"
 Write-Host ""
-
-

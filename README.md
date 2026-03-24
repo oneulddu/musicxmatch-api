@@ -1,4 +1,4 @@
-# ivLyrics MusicXMatch Provider (Node.js)
+# ivLyrics MusicXMatch Provider
 
 MusicXMatch 가사 제공자 애드온 for ivLyrics
 
@@ -6,9 +6,10 @@ MusicXMatch 가사 제공자 애드온 for ivLyrics
 
 - ✅ 동기화 가사 (richsync) 지원
 - ✅ 일반 가사 지원
-- ✅ 자동 트랙 매칭 (스코어링 시스템)
+- ✅ Spotify Track ID 우선 매칭
+- ✅ 자동 트랙 매칭 (Android API 기반)
 - ✅ 캐싱 (30분)
-- ✅ 자동 시작 설정
+- ✅ Rust 단일 바이너리 서버
 
 ## 설치
 
@@ -28,7 +29,7 @@ iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
-이 명령은 로컬 서버를 `~/.ivlyrics-musicxmatch`에 설치하고, `http://localhost:8092`로 자동 시작되도록 설정합니다.
+이 명령은 Rust 기반 로컬 서버를 설치하고, `http://localhost:8092`로 자동 시작되도록 설정합니다.
 
 ## ivLyrics 애드온 추가
 
@@ -68,11 +69,10 @@ ivLyrics 앱 폴더 위치:
 
 ## 수동 설치
 
-서버만 직접 실행하려면:
+Rust가 설치되어 있다면 서버만 직접 실행할 수 있습니다:
 
 ```bash
-npm install
-node server.js
+cargo run
 ```
 
 서버 상태 확인:
@@ -86,4 +86,3 @@ curl http://127.0.0.1:8092/health
 ## Python API (Legacy)
 
 Python 버전은 `legacy/` 폴더에 있습니다.
-

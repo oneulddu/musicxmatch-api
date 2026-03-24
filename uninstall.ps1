@@ -1,22 +1,27 @@
 $ErrorActionPreference = "Continue"
 
-$InstallDir = "$env:LOCALAPPDATA\ivLyrics\musicxmatch-provider"
-$startupFolder = [System.Environment]::GetFolderPath("Startup")
-$shortcutPath = Join-Path $startupFolder "MusicXMatch Provider.lnk"
+$InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
+$TaskName = "ivLyrics-MusicXMatch"
+$BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 
 Write-Host ""
 Write-Host "Removing MusicXMatch Provider..." -ForegroundColor Yellow
 
-Get-Process | Where-Object { $_.Path -like "*musicxmatch-provider*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process | Where-Object { $_.Path -like "*ivlyrics-musicxmatch-server*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-if (Test-Path $shortcutPath) {
-    Remove-Item $shortcutPath -Force
-    Write-Host "  [OK] Startup shortcut removed" -ForegroundColor Green
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Host "  [OK] Scheduled task removed" -ForegroundColor Green
 }
 
 if (Test-Path $InstallDir) {
     Remove-Item $InstallDir -Recurse -Force
     Write-Host "  [OK] Install directory removed" -ForegroundColor Green
+}
+
+if (Test-Path $BinPath) {
+    Remove-Item $BinPath -Force
+    Write-Host "  [OK] Binary removed" -ForegroundColor Green
 }
 
 Write-Host ""

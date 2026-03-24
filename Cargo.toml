@@ -1,0 +1,19 @@
+[package]
+name = "ivlyrics-musicxmatch-server"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Local lyrics bridge server for ivLyrics powered by musixmatch-inofficial"
+repository = "https://github.com/oneulddu/musicxmatch-api"
+
+[[bin]]
+name = "ivlyrics-musicxmatch-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+dirs = "6.0.0"
+musixmatch-inofficial = "0.4.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net"] }
