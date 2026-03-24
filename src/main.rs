@@ -250,6 +250,17 @@ fn log_file_path() -> PathBuf {
     path
 }
 
+fn update_log_file_path() -> PathBuf {
+    if let Ok(value) = std::env::var("IVLYRICS_MXM_UPDATE_LOG") {
+        return PathBuf::from(value);
+    }
+
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".ivlyrics-musicxmatch");
+    path.push("update.log");
+    path
+}
+
 fn config_file_path() -> PathBuf {
     if let Ok(value) = std::env::var("IVLYRICS_MXM_CONFIG") {
         return PathBuf::from(value);
@@ -571,6 +582,35 @@ fn current_platform() -> &'static str {
     }
 }
 
+fn runtime_path() -> String {
+    let mut parts = vec![
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+    ];
+
+    if let Some(home) = dirs::home_dir() {
+        parts.push(home.join(".cargo/bin").display().to_string());
+        parts.push(home.join(".spicetify").display().to_string());
+    }
+
+    if let Ok(existing) = std::env::var("PATH") {
+        parts.push(existing);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .filter(|part| seen.insert(part.clone()))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 async fn current_deezer_arl(state: &AppState) -> Option<String> {
     if let Ok(value) = std::env::var("DEEZER_ARL") {
         let trimmed = value.trim();
@@ -691,6 +731,11 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let path = runtime_path();
+        let update_log = update_log_file_path();
+        if let Some(parent) = update_log.parent() {
+            let _ = create_dir_all(parent);
+        }
         let addon_steps = if include_addon {
             "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; spicetify apply"
         } else {
@@ -701,7 +746,15 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
             addon_steps
         );
         Command::new("sh")
-            .args(["-c", &format!("nohup sh -c '{}' >/dev/null 2>&1 &", command)])
+            .env("PATH", path)
+            .args([ 
+                "-c",
+                &format!(
+                    "nohup sh -c '{}' >> '{}' 2>&1 &",
+                    command,
+                    update_log.display()
+                ),
+            ])
             .spawn()
             .map_err(|error| error.to_string())?;
         Ok(())

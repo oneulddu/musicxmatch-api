@@ -9,6 +9,7 @@ SERVICE_LABEL="com.ivlyrics.musicxmatch"
 BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
 SERVER_URL="http://127.0.0.1:8092"
+RUNTIME_PATH="$HOME/.cargo/bin:$HOME/.spicetify:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 echo "[1/6] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
@@ -44,6 +45,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     <dict>
         <key>MXM_SESSION_FILE</key>
         <string>$INSTALL_DIR/musixmatch_session.json</string>
+        <key>PATH</key>
+        <string>$RUNTIME_PATH</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

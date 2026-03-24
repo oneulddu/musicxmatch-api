@@ -320,6 +320,12 @@ macOS/Linux:
 tail -f ~/.ivlyrics-musicxmatch/server.log
 ```
 
+`Update now` / `Update all` 백그라운드 작업 로그:
+
+```bash
+tail -f ~/.ivlyrics-musicxmatch/update.log
+```
+
 ## ivLyrics 로컬 패치 메모
 
 현재 `ivLyrics` 원본은 빈 가사 배열 `[]`도 성공처럼 처리할 수 있어서, 앞선 provider가 빈 결과를 반환하면 MusicXMatch까지 내려오지 못하는 경우가 있습니다.
