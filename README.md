@@ -31,6 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 
 이 명령은 Rust 기반 로컬 서버를 설치하고, `http://127.0.0.1:8092`로 자동 시작되도록 설정합니다.
 설치 스크립트는 마지막 단계에서 `/health` 응답과 `Access-Control-Allow-Origin: *` 헤더까지 검사합니다.
+Windows에서는 작업 스케줄러가 직접 exe를 실행하지 않고 `run-server.ps1` 래퍼를 통해 로그를 남기면서 서버를 실행합니다.
 
 ## ivLyrics 애드온 추가
 
@@ -244,6 +245,12 @@ Windows에서 로그를 실시간으로 보려면:
 
 ```powershell
 Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.log" -Wait
+```
+
+stdout/stderr까지 같이 보려면:
+
+```powershell
+Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.stdout.log" -Wait
 ```
 
 macOS/Linux:

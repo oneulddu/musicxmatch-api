@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
@@ -82,6 +84,10 @@ struct DebugPayload {
     matched_by: &'static str,
     #[serde(rename = "durationMs")]
     duration_ms: Option<u64>,
+    #[serde(rename = "selectedTrackId")]
+    selected_track_id: Option<u64>,
+    #[serde(rename = "selectedTrackDurationMs")]
+    selected_track_duration_ms: Option<u64>,
     #[serde(rename = "searchVariants")]
     search_variants: Vec<String>,
 }
@@ -198,10 +204,10 @@ fn timestamp_string() -> String {
     }
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthPayload> {
+async fn health(State(state): State<AppState>) -> Response {
     state.logger.log("GET /health");
     let cache_entries = state.cache.lock().await.len();
-    Json(HealthPayload {
+    json_response(StatusCode::OK, HealthPayload {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         provider: PROVIDER_NAME,
@@ -213,12 +219,12 @@ async fn health(State(state): State<AppState>) -> Json<HealthPayload> {
     })
 }
 
-async fn clear_cache(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn clear_cache(State(state): State<AppState>) -> Response {
     state.logger.log("DELETE /cache");
     let mut cache = state.cache.lock().await;
     let deleted = cache.len();
     cache.clear();
-    Json(serde_json::json!({ "deleted": deleted }))
+    json_response(StatusCode::OK, serde_json::json!({ "deleted": deleted }))
 }
 
 async fn get_lyrics(
@@ -240,7 +246,7 @@ async fn get_lyrics(
             .log("rejecting /lyrics request because title/artist are missing");
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorPayload {
+            json_response(StatusCode::BAD_REQUEST, ErrorPayload {
                 detail: "title and artist are required when spotifyId is missing".to_string(),
             }),
         )
@@ -250,7 +256,7 @@ async fn get_lyrics(
     let cache_key = build_cache_key(&title, &artist, &spotify_id);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
         state.logger.log(&format!("cache hit for key={cache_key}"));
-        return (StatusCode::OK, Json(cached)).into_response();
+        return json_response(StatusCode::OK, cached);
     }
 
     match fetch_payload(
@@ -273,7 +279,7 @@ async fn get_lyrics(
             ));
             payload.cached = false;
             store_cache(&state, cache_key, payload.clone()).await;
-            (StatusCode::OK, Json(payload)).into_response()
+            json_response(StatusCode::OK, payload)
         }
         Err(error) => {
             let (status, detail) = map_error(error);
@@ -281,9 +287,18 @@ async fn get_lyrics(
                 "lyrics request failed status={} detail={detail}",
                 status.as_u16()
             ));
-            (status, Json(ErrorPayload { detail })).into_response()
+            json_response(status, ErrorPayload { detail })
         }
     }
+}
+
+fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
+    let mut response = (status, Json(payload)).into_response();
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        "application/json; charset=utf-8".parse().expect("valid content-type header"),
+    );
+    response
 }
 
 async fn cached_payload(state: &AppState, key: &str) -> Option<LyricsPayload> {
@@ -335,6 +350,8 @@ async fn fetch_payload(
                 source: "spotify_id",
                 matched_by: "track_id",
                 duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+                selected_track_id: None,
+                selected_track_duration_ms: None,
                 search_variants: Vec::new(),
             }),
         )
@@ -354,6 +371,8 @@ async fn fetch_payload(
             source: "search",
             matched_by: resolution.matched_by,
             duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+            selected_track_id: None,
+            selected_track_duration_ms: None,
             search_variants: resolution.search_variants,
         }),
     )
@@ -371,6 +390,11 @@ async fn fetch_by_id(
         Some(track) => track,
         None => mxm.track(id.clone(), false, false, false).await?,
     };
+    let mut debug = debug;
+    if let Some(payload) = debug.as_mut() {
+        payload.selected_track_id = Some(track.track_id);
+        payload.selected_track_duration_ms = Some(track.track_length.into());
+    }
 
     let subtitle = mxm
         .track_subtitle(
@@ -397,13 +421,18 @@ async fn fetch_by_id(
     }
 
     let lyrics = mxm.track_lyrics(id).await?;
+    let text = strip_lyrics_footer(&lyrics.lyrics_body);
+    if text.is_empty() {
+        return Err(MxmError::NotAvailable);
+    }
+
     Ok(LyricsPayload {
         provider: PROVIDER_NAME,
         track_id: Some(track.track_id),
         track_name: Some(track.track_name),
         artist_name: Some(track.artist_name),
         lrc: None,
-        text: Some(strip_lyrics_footer(&lyrics.lyrics_body)),
+        text: Some(text),
         cached: false,
         debug,
     })
@@ -667,18 +696,7 @@ fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Option<f
 
     if let Some(want_duration) = duration_secs {
         let actual_duration = track.track_length as f32 / 1000.0;
-        let delta = (actual_duration - want_duration).abs();
-        if delta <= 1.5 {
-            score += 18.0;
-        } else if delta <= 3.0 {
-            score += 10.0;
-        } else if delta <= 6.0 {
-            score += 4.0;
-        } else if delta >= 20.0 {
-            score -= 20.0;
-        } else if delta >= 10.0 {
-            score -= 8.0;
-        }
+        score += duration_score((actual_duration - want_duration).abs());
     }
 
     if track.has_subtitles {
@@ -707,6 +725,22 @@ fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Option<f
     }
 
     score
+}
+
+fn duration_score(delta_secs: f32) -> f32 {
+    if delta_secs <= 1.5 {
+        18.0
+    } else if delta_secs <= 3.0 {
+        10.0
+    } else if delta_secs <= 6.0 {
+        4.0
+    } else if delta_secs >= 20.0 {
+        -20.0
+    } else if delta_secs >= 10.0 {
+        -8.0
+    } else {
+        0.0
+    }
 }
 
 fn strip_lyrics_footer(value: &str) -> String {
@@ -785,5 +819,15 @@ mod tests {
     fn simplify_drops_brackets_and_preserves_korean() {
         assert_eq!(simplify("Love Love Love (feat. 융진)"), "love love love");
         assert_eq!(simplify("끊었어? (demo)"), "끊었어");
+    }
+
+    #[test]
+    fn duration_score_rewards_close_matches_and_penalizes_far_ones() {
+        assert_eq!(duration_score(1.0), 18.0);
+        assert_eq!(duration_score(2.5), 10.0);
+        assert_eq!(duration_score(5.0), 4.0);
+        assert_eq!(duration_score(12.0), -8.0);
+        assert_eq!(duration_score(24.0), -20.0);
+        assert_eq!(duration_score(8.0), 0.0);
     }
 }

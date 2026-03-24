@@ -3,6 +3,7 @@ $ErrorActionPreference = "Continue"
 $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
+$RunnerScript = Join-Path $InstallDir "run-server.ps1"
 
 Write-Host ""
 Write-Host "Removing MusicXMatch Provider..." -ForegroundColor Yellow
@@ -17,6 +18,10 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 if (Test-Path $InstallDir) {
     Remove-Item $InstallDir -Recurse -Force
     Write-Host "  [OK] Install directory removed" -ForegroundColor Green
+}
+
+if (Test-Path $RunnerScript) {
+    Remove-Item $RunnerScript -Force -ErrorAction SilentlyContinue
 }
 
 if (Test-Path $BinPath) {

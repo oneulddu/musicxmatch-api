@@ -7,6 +7,7 @@ $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $ServerUrl = "http://127.0.0.1:8092"
+$RunnerScript = Join-Path $InstallDir "run-server.ps1"
 
 Write-Host "[1/6] Creating installation directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -20,7 +21,14 @@ Write-Host "[3/6] Installing server binary..." -ForegroundColor Yellow
 cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyrics-musicxmatch-server --force
 
 Write-Host "[4/6] Setting up auto-start..." -ForegroundColor Yellow
-$Action = New-ScheduledTaskAction -Execute $BinPath -WorkingDirectory $InstallDir
+$RunnerBody = @"
+$env:MXM_SESSION_FILE = "$InstallDir\musixmatch_session.json"
+$env:IVLYRICS_MXM_LOG = "$InstallDir\server.log"
+& "$BinPath" *>> "$InstallDir\server.stdout.log"
+"@
+Set-Content -Path $RunnerScript -Value $RunnerBody -Encoding UTF8
+
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerScript`"" -WorkingDirectory $InstallDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
