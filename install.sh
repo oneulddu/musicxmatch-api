@@ -8,11 +8,12 @@ INSTALL_DIR="$HOME/.ivlyrics-musicxmatch"
 SERVICE_LABEL="com.ivlyrics.musicxmatch"
 BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
+SERVER_URL="http://127.0.0.1:8092"
 
-echo "[1/5] Creating installation directory..."
+echo "[1/6] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
 
-echo "[2/5] Ensuring Rust toolchain is available..."
+echo "[2/6] Ensuring Rust toolchain is available..."
 if ! command -v cargo >/dev/null 2>&1; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
         brew install rust
@@ -22,10 +23,10 @@ if ! command -v cargo >/dev/null 2>&1; then
     fi
 fi
 
-echo "[3/5] Installing server binary..."
+echo "[3/6] Installing server binary..."
 cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyrics-musicxmatch-server --force
 
-echo "[4/5] Setting up auto-start..."
+echo "[4/6] Setting up auto-start..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
     cat > "$PLIST" <<EOF
@@ -73,10 +74,22 @@ EOF
     systemctl --user restart ivlyrics-musicxmatch
 fi
 
-echo "[5/5] Starting server..."
+echo "[5/6] Starting server..."
 sleep 2
+
+echo "[6/6] Verifying health and CORS..."
+HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
+if [[ -z "$HEALTH_HEADERS" ]]; then
+    echo "Server health check failed: $SERVER_URL/health"
+    exit 1
+fi
+
+echo "$HEALTH_HEADERS" | grep -qi '^access-control-allow-origin: \*$' || {
+    echo "CORS header check failed: access-control-allow-origin: * not found"
+    exit 1
+}
 
 echo ""
 echo "✓ Installation complete!"
-echo "Server running at http://127.0.0.1:8092"
+echo "Server running at $SERVER_URL"
 echo ""

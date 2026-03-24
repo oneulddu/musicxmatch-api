@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 ```
 
 이 명령은 Rust 기반 로컬 서버를 설치하고, `http://127.0.0.1:8092`로 자동 시작되도록 설정합니다.
+설치 스크립트는 마지막 단계에서 `/health` 응답과 `Access-Control-Allow-Origin: *` 헤더까지 검사합니다.
 
 ## ivLyrics 애드온 추가
 
@@ -200,6 +201,21 @@ content-type: application/json
 
 ```bash
 curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%94%BD%ED%95%98%EC%9D%B4"
+```
+
+매칭 과정을 같이 보고 싶으면 `debug=1`을 붙이세요.
+
+```bash
+curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%94%BD%ED%95%98%EC%9D%B4&debug=1"
+```
+
+이 경우 응답에 아래 같은 디버그 정보가 추가됩니다.
+
+```text
+debug.source
+debug.matchedBy
+debug.durationMs
+debug.searchVariants
 ```
 
 ## 로그

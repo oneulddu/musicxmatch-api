@@ -42,6 +42,7 @@ struct LyricsQuery {
     spotify_id: Option<String>,
     #[serde(alias = "durationMs")]
     duration_ms: Option<u64>,
+    debug: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -64,6 +65,18 @@ struct LyricsPayload {
     lrc: Option<String>,
     text: Option<String>,
     cached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug: Option<DebugPayload>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct DebugPayload {
+    source: &'static str,
+    matched_by: &'static str,
+    #[serde(rename = "durationMs")]
+    duration_ms: Option<u64>,
+    #[serde(rename = "searchVariants")]
+    search_variants: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +217,7 @@ async fn get_lyrics(
     let artist = query.artist.unwrap_or_default().trim().to_string();
     let spotify_id = query.spotify_id.unwrap_or_default().trim().to_string();
     let duration_secs = query.duration_ms.map(|value| value as f32 / 1000.0);
+    let include_debug = query.debug.unwrap_or(false);
     state.logger.log(&format!(
         "GET /lyrics title={title:?} artist={artist:?} spotify_id={spotify_id:?}"
     ));
@@ -227,7 +241,16 @@ async fn get_lyrics(
         return (StatusCode::OK, Json(cached)).into_response();
     }
 
-    match fetch_payload(&state.mxm, &title, &artist, &spotify_id, duration_secs).await {
+    match fetch_payload(
+        &state.mxm,
+        &title,
+        &artist,
+        &spotify_id,
+        duration_secs,
+        include_debug,
+    )
+    .await
+    {
         Ok(mut payload) => {
             state.logger.log(&format!(
                 "lyrics resolved track_id={:?} track_name={:?} has_lrc={} has_text={}",
@@ -288,6 +311,7 @@ async fn fetch_payload(
     artist: &str,
     spotify_id: &str,
     duration_secs: Option<f32>,
+    include_debug: bool,
 ) -> Result<LyricsPayload, MxmError> {
     if !spotify_id.is_empty() {
         if let Ok(payload) = fetch_by_id(
@@ -295,6 +319,12 @@ async fn fetch_payload(
             TrackId::Spotify(spotify_id.to_owned().into()),
             None,
             duration_secs,
+            include_debug.then(|| DebugPayload {
+                source: "spotify_id",
+                matched_by: "track_id",
+                duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+                search_variants: Vec::new(),
+            }),
         )
         .await
         {
@@ -302,12 +332,18 @@ async fn fetch_payload(
         }
     }
 
-    let track = resolve_track(mxm, title, artist).await?;
+    let resolution = resolve_track(mxm, title, artist, duration_secs).await?;
     fetch_by_id(
         mxm,
-        TrackId::TrackId(track.track_id),
-        Some(track),
+        TrackId::TrackId(resolution.track.track_id),
+        Some(resolution.track),
         duration_secs,
+        include_debug.then(|| DebugPayload {
+            source: "search",
+            matched_by: resolution.matched_by,
+            duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+            search_variants: resolution.search_variants,
+        }),
     )
     .await
 }
@@ -317,6 +353,7 @@ async fn fetch_by_id(
     id: TrackId<'static>,
     known_track: Option<Track>,
     duration_secs: Option<f32>,
+    debug: Option<DebugPayload>,
 ) -> Result<LyricsPayload, MxmError> {
     let track = match known_track {
         Some(track) => track,
@@ -342,6 +379,7 @@ async fn fetch_by_id(
                 lrc: Some(subtitle.subtitle_body),
                 text: None,
                 cached: false,
+                debug,
             });
         }
     }
@@ -355,16 +393,31 @@ async fn fetch_by_id(
         lrc: None,
         text: Some(strip_lyrics_footer(&lyrics.lyrics_body)),
         cached: false,
+        debug,
     })
 }
 
-async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Track, MxmError> {
+struct TrackResolution {
+    track: Track,
+    matched_by: &'static str,
+    search_variants: Vec<String>,
+}
+
+async fn resolve_track(
+    mxm: &Musixmatch,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> Result<TrackResolution, MxmError> {
     let mut tracks_by_id = HashMap::new();
     let title_variants = title_variants(title);
     let artist_variants = artist_variants(artist);
+    let mut attempted_variants = Vec::new();
+    let mut matched_by = "search:title+artist";
 
     for title_variant in &title_variants {
         for artist_variant in &artist_variants {
+            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
             let tracks = search_tracks(mxm, Some(title_variant), Some(artist_variant)).await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
@@ -373,7 +426,9 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     }
 
     if tracks_by_id.is_empty() {
+        matched_by = "search:title";
         for title_variant in &title_variants {
+            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
             let tracks = search_tracks(mxm, Some(title_variant), None).await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
@@ -382,7 +437,9 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     }
 
     if tracks_by_id.is_empty() {
+        matched_by = "search:artist";
         for artist_variant in &artist_variants {
+            attempted_variants.push(format!("title=<none> | artist={artist_variant}"));
             let tracks = search_tracks(mxm, None, Some(artist_variant)).await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
@@ -391,8 +448,10 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     }
 
     if tracks_by_id.is_empty() {
+        matched_by = "matcher:variants";
         for title_variant in &title_variants {
             for artist_variant in &artist_variants {
+                attempted_variants.push(format!("matcher title={title_variant} | artist={artist_variant}"));
                 if let Ok(matched) = mxm
                     .matcher_track(title_variant, artist_variant, "", false, false, false)
                     .await
@@ -404,6 +463,8 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     }
 
     if tracks_by_id.is_empty() {
+        matched_by = "matcher:original";
+        attempted_variants.push(format!("matcher title={title} | artist={artist}"));
         let matched = mxm.matcher_track(title, artist, "", false, false, false).await?;
         tracks_by_id.insert(matched.track_id, matched);
     }
@@ -411,9 +472,14 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     tracks_by_id
         .into_values()
         .max_by(|left, right| {
-            score_track(left, title, artist)
-                .partial_cmp(&score_track(right, title, artist))
+            score_track(left, title, artist, duration_secs)
+                .partial_cmp(&score_track(right, title, artist, duration_secs))
                 .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|track| TrackResolution {
+            track,
+            matched_by,
+            search_variants: attempted_variants,
         })
         .ok_or(MxmError::NotFound)
 }
@@ -568,7 +634,7 @@ fn similarity(a: &str, b: &str) -> f32 {
     matches / len
 }
 
-fn score_track(track: &Track, title: &str, artist: &str) -> f32 {
+fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Option<f32>) -> f32 {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
     let track_title = simplify(&track.track_name);
@@ -585,6 +651,22 @@ fn score_track(track: &Track, title: &str, artist: &str) -> f32 {
 
     if want_artist == track_artist || track_artist.contains(&want_artist) {
         score += 10.0;
+    }
+
+    if let Some(want_duration) = duration_secs {
+        let actual_duration = track.track_length as f32 / 1000.0;
+        let delta = (actual_duration - want_duration).abs();
+        if delta <= 1.5 {
+            score += 18.0;
+        } else if delta <= 3.0 {
+            score += 10.0;
+        } else if delta <= 6.0 {
+            score += 4.0;
+        } else if delta >= 20.0 {
+            score -= 20.0;
+        } else if delta >= 10.0 {
+            score -= 8.0;
+        }
     }
 
     if track.has_subtitles {
