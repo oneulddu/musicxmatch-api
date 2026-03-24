@@ -358,18 +358,12 @@ async fn fetch_by_id(
 
 async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Track, MxmError> {
     let mut tracks_by_id = HashMap::new();
+    let title_variants = title_variants(title);
+    let artist_variants = artist_variants(artist);
 
-    for title_variant in title_variants(title) {
-        for artist_variant in artist_variants(artist) {
-            let tracks = mxm
-                .track_search()
-                .q_track(&title_variant)
-                .q_artist(&artist_variant)
-                .f_has_lyrics()
-                .s_track_rating(SortOrder::Desc)
-                .send(10, 1)
-                .await?;
-
+    for title_variant in &title_variants {
+        for artist_variant in &artist_variants {
+            let tracks = search_tracks(mxm, Some(title_variant), Some(artist_variant)).await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
@@ -377,10 +371,39 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
     }
 
     if tracks_by_id.is_empty() {
-        let matched = mxm
-            .matcher_track(title, artist, "", false, false, false)
-            .await?;
-        return Ok(matched);
+        for title_variant in &title_variants {
+            let tracks = search_tracks(mxm, Some(title_variant), None).await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        for artist_variant in &artist_variants {
+            let tracks = search_tracks(mxm, None, Some(artist_variant)).await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        for title_variant in &title_variants {
+            for artist_variant in &artist_variants {
+                if let Ok(matched) = mxm
+                    .matcher_track(title_variant, artist_variant, "", false, false, false)
+                    .await
+                {
+                    tracks_by_id.entry(matched.track_id).or_insert(matched);
+                }
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        let matched = mxm.matcher_track(title, artist, "", false, false, false).await?;
+        tracks_by_id.insert(matched.track_id, matched);
     }
 
     tracks_by_id
@@ -393,6 +416,27 @@ async fn resolve_track(mxm: &Musixmatch, title: &str, artist: &str) -> Result<Tr
         .ok_or(MxmError::NotFound)
 }
 
+async fn search_tracks(
+    mxm: &Musixmatch,
+    title: Option<&str>,
+    artist: Option<&str>,
+) -> Result<Vec<Track>, MxmError> {
+    let mut query = mxm.track_search();
+
+    if let Some(title) = title {
+        query = query.q_track(title);
+    }
+    if let Some(artist) = artist {
+        query = query.q_artist(artist);
+    }
+
+    query
+        .f_has_lyrics()
+        .s_track_rating(SortOrder::Desc)
+        .send(10, 1)
+        .await
+}
+
 fn title_variants(title: &str) -> Vec<String> {
     let mut values = Vec::new();
     let base = title.trim();
@@ -401,6 +445,7 @@ fn title_variants(title: &str) -> Vec<String> {
     push_variant(&mut values, &strip_featured(base));
     push_variant(&mut values, &collapse_to_words(base));
     push_variant(&mut values, &collapse_alnum(base));
+    push_variant(&mut values, &normalize_connectors(base));
     values
 }
 
@@ -411,6 +456,7 @@ fn artist_variants(artist: &str) -> Vec<String> {
     push_variant(&mut values, &first_artist(base));
     push_variant(&mut values, &strip_featured(base));
     push_variant(&mut values, &collapse_to_words(base));
+    push_variant(&mut values, &normalize_connectors(base));
     values
 }
 
@@ -468,7 +514,7 @@ fn first_artist(value: &str) -> String {
 fn collapse_to_words(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -478,8 +524,18 @@ fn collapse_to_words(value: &str) -> String {
 fn collapse_alnum(value: &str) -> String {
     value
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(|ch| ch.is_alphanumeric())
         .collect::<String>()
+}
+
+fn normalize_connectors(value: &str) -> String {
+    value
+        .replace('&', " and ")
+        .replace('×', " x ")
+        .replace('/', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn normalize(value: &str) -> String {
