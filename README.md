@@ -197,6 +197,19 @@ access-control-allow-origin: *
 content-type: application/json
 ```
 
+응답 JSON에는 아래 정보도 포함됩니다.
+
+```text
+status
+version
+provider
+backend
+cors
+cacheEntries
+sessionFile
+logFile
+```
+
 가사 요청도 직접 확인할 수 있습니다.
 
 ```bash
@@ -238,3 +251,16 @@ macOS/Linux:
 ```bash
 tail -f ~/.ivlyrics-musicxmatch/server.log
 ```
+
+## ivLyrics 로컬 패치 메모
+
+현재 `ivLyrics` 원본은 빈 가사 배열 `[]`도 성공처럼 처리할 수 있어서, 앞선 provider가 빈 결과를 반환하면 MusicXMatch까지 내려오지 못하는 경우가 있습니다.
+
+로컬에서 아래 파일을 패치해 두면 안정적입니다.
+- [LyricsAddonManager.js](/Users/oneul/Desktop/Workspace/ivLyrics/LyricsAddonManager.js)
+
+핵심 내용:
+- `karaoke`, `synced`, `unsynced`를 단순 truthy가 아니라 `배열 길이 > 0`으로 판단
+- 빈 결과면 다음 provider로 계속 진행
+
+이 수정은 `ivLyrics` 업데이트 시 덮어써질 수 있으니, 업데이트 후 가사가 다시 안 뜨면 가장 먼저 이 부분을 확인하는 편이 좋습니다.

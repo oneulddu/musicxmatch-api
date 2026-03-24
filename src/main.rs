@@ -51,6 +51,13 @@ struct HealthPayload {
     version: &'static str,
     provider: &'static str,
     backend: &'static str,
+    cors: bool,
+    #[serde(rename = "cacheEntries")]
+    cache_entries: usize,
+    #[serde(rename = "sessionFile")]
+    session_file: String,
+    #[serde(rename = "logFile")]
+    log_file: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -193,11 +200,16 @@ fn timestamp_string() -> String {
 
 async fn health(State(state): State<AppState>) -> Json<HealthPayload> {
     state.logger.log("GET /health");
+    let cache_entries = state.cache.lock().await.len();
     Json(HealthPayload {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         provider: PROVIDER_NAME,
         backend: "musixmatch-inofficial",
+        cors: true,
+        cache_entries,
+        session_file: session_file_path().display().to_string(),
+        log_file: log_file_path().display().to_string(),
     })
 }
 
