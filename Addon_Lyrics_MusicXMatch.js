@@ -10,14 +10,14 @@
     'use strict';
 
     const ADDON_ID = 'musicxmatch-provider';
-    const DEFAULT_SERVER_URL = 'http://localhost:8092';
+    const DEFAULT_SERVER_URL = 'http://127.0.0.1:8092';
     const DEFAULT_TIMEOUT_SEC = 15;
 
     const ADDON_INFO = {
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
         author: 'oneulddu',
-        version: '0.2.1',
+        version: '0.2.2',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
         },
@@ -43,9 +43,48 @@
         window.LyricsAddonManager?.setAddonSetting(ADDON_ID, key, value);
     }
 
+    function normalizeServerUrl(value) {
+        return (value || DEFAULT_SERVER_URL).replace(/\/$/, '');
+    }
+
     function getServerUrl() {
         const value = getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL);
-        return (value || DEFAULT_SERVER_URL).replace(/\/$/, '');
+        return normalizeServerUrl(value);
+    }
+
+    function getServerCandidates(serverUrl) {
+        const normalized = normalizeServerUrl(serverUrl);
+        const candidates = [normalized];
+
+        try {
+            const parsed = new URL(normalized);
+            if (parsed.hostname === 'localhost') {
+                parsed.hostname = '127.0.0.1';
+                candidates.push(parsed.toString().replace(/\/$/, ''));
+            }
+        } catch {
+            // Ignore invalid URLs here and let fetch surface the error later.
+        }
+
+        return [...new Set(candidates)];
+    }
+
+    async function fetchJsonWithFallback(serverUrl, path, timeoutMs) {
+        const candidates = getServerCandidates(serverUrl);
+        let lastError = null;
+
+        for (const baseUrl of candidates) {
+            try {
+                const response = await fetch(`${baseUrl}${path}`, {
+                    signal: AbortSignal.timeout(timeoutMs),
+                });
+                return { response, baseUrl };
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError || new Error('Request failed');
     }
 
     function getTimeoutMs() {
@@ -124,9 +163,10 @@
             const testConnection = async () => {
                 setStatus('testing');
                 try {
-                    const response = await fetch(`${(serverUrl || DEFAULT_SERVER_URL).replace(/\/$/, '')}/health`, {
-                        signal: AbortSignal.timeout(5000),
-                    });
+                    const { response, baseUrl } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/health', 5000);
+                    if (baseUrl !== normalizeServerUrl(serverUrl || DEFAULT_SERVER_URL)) {
+                        saveUrl(baseUrl);
+                    }
                     setStatus(response.ok ? 'ok' : 'fail');
                 } catch {
                     setStatus('fail');
@@ -224,9 +264,11 @@
 
         let response;
         try {
-            response = await fetch(`${serverUrl}/lyrics?${params.toString()}`, {
-                signal: AbortSignal.timeout(timeout),
-            });
+            const fetchResult = await fetchJsonWithFallback(serverUrl, `/lyrics?${params.toString()}`, timeout);
+            response = fetchResult.response;
+            if (fetchResult.baseUrl !== serverUrl) {
+                setSetting(SETTING.SERVER_URL, fetchResult.baseUrl);
+            }
         } catch (error) {
             result.error = `Server connection failed: ${error.message}`;
             return result;

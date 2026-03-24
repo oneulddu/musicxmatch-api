@@ -30,5 +30,5 @@ Start-Sleep -Seconds 2
 
 Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
-Write-Host "Server running at http://localhost:8092"
+Write-Host "Server running at http://127.0.0.1:8092"
 Write-Host ""

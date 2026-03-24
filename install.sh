@@ -78,5 +78,5 @@ sleep 2
 
 echo ""
 echo "✓ Installation complete!"
-echo "Server running at http://localhost:8092"
+echo "Server running at http://127.0.0.1:8092"
 echo ""
