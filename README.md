@@ -130,8 +130,11 @@ Linux(systemd user)에서는:
 systemctl --user restart ivlyrics-musicxmatch
 ```
 
-설정 화면에서 `Update now`를 누르면 로컬 서버가 설치 스크립트를 백그라운드에서 다시 실행합니다.
-다만 Spicetify 애드온 파일 교체와 `spicetify apply`는 자동으로 하지 않으므로, 서버 업데이트 후에는 설정 화면에 표시되는 명령대로 애드온도 함께 갱신하는 편이 안전합니다.
+설정 화면에는 두 가지 버튼이 있습니다.
+- `Update now`: 서버 설치 스크립트만 다시 실행
+- `Update all`: 서버 설치 스크립트 실행 + 애드온 파일 갱신 + `spicetify apply`
+
+`Update all`은 Spotify UI가 다시 적용되므로 실행 시 잠깐 재로딩될 수 있습니다.
 
 ## 제거
 
@@ -245,6 +248,12 @@ curl http://127.0.0.1:8092/update/check
 
 ```bash
 curl -X POST http://127.0.0.1:8092/update/apply
+```
+
+서버 + 애드온 + `spicetify apply`까지 한 번에 예약하려면:
+
+```bash
+curl -X POST http://127.0.0.1:8092/update/apply-all
 ```
 
 ## 로그

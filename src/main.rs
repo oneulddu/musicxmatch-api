@@ -118,7 +118,10 @@ struct UpdateCheckPayload {
     #[serde(rename = "updateAvailable")]
     update_available: bool,
     platform: &'static str,
-    command: Vec<String>,
+    #[serde(rename = "serverCommand")]
+    server_command: Vec<String>,
+    #[serde(rename = "allCommand")]
+    all_command: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +158,7 @@ async fn main() {
         .route("/cache", delete(clear_cache))
         .route("/update/check", get(update_check))
         .route("/update/apply", post(update_apply))
+        .route("/update/apply-all", post(update_apply_all))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state);
 
@@ -341,7 +345,8 @@ async fn update_check(State(state): State<AppState>) -> Response {
                 latest_addon_version: info.addon,
                 update_available: compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0,
                 platform: current_platform(),
-                command: update_command_lines(),
+                server_command: update_server_command_lines(),
+                all_command: update_all_command_lines(),
             },
         ),
         Err(error) => json_response(
@@ -355,13 +360,33 @@ async fn update_check(State(state): State<AppState>) -> Response {
 
 async fn update_apply(State(state): State<AppState>) -> Response {
     state.logger.log("POST /update/apply");
-    match spawn_update_process() {
+    match spawn_update_process(false) {
         Ok(()) => json_response(
             StatusCode::ACCEPTED,
             UpdateApplyPayload {
                 status: "scheduled",
                 platform: current_platform(),
-                command: update_command_lines(),
+                command: update_server_command_lines(),
+            },
+        ),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorPayload {
+                detail: error,
+            },
+        ),
+    }
+}
+
+async fn update_apply_all(State(state): State<AppState>) -> Response {
+    state.logger.log("POST /update/apply-all");
+    match spawn_update_process(true) {
+        Ok(()) => json_response(
+            StatusCode::ACCEPTED,
+            UpdateApplyPayload {
+                status: "scheduled",
+                platform: current_platform(),
+                command: update_all_command_lines(),
             },
         ),
         Err(error) => json_response(
@@ -435,7 +460,22 @@ fn current_platform() -> &'static str {
     }
 }
 
-fn update_command_lines() -> Vec<String> {
+fn update_server_command_lines() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![
+            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
+        ]
+    }
+}
+
+fn update_all_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         vec![
@@ -454,12 +494,20 @@ fn update_command_lines() -> Vec<String> {
     }
 }
 
-fn spawn_update_process() -> Result<(), String> {
+fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let command = "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex'";
+        let addon_steps = if include_addon {
+            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; spicetify apply"
+        } else {
+            ""
+        };
+        let command = format!(
+            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex{}'",
+            addon_steps
+        );
         Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command])
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command])
             .spawn()
             .map_err(|error| error.to_string())?;
         return Ok(());
@@ -467,7 +515,15 @@ fn spawn_update_process() -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let command = "sleep 1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash";
+        let addon_steps = if include_addon {
+            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; spicetify apply"
+        } else {
+            ""
+        };
+        let command = format!(
+            "sleep 1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash{}",
+            addon_steps
+        );
         Command::new("sh")
             .args(["-c", &format!("nohup sh -c '{}' >/dev/null 2>&1 &", command)])
             .spawn()

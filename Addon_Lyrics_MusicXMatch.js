@@ -17,7 +17,7 @@
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
         author: 'oneulddu',
-        version: '0.3.0',
+        version: '0.3.1',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
         },
@@ -141,6 +141,25 @@
         return lines.length ? lines : null;
     }
 
+    function parseVersion(value) {
+        return String(value || '0.0.0')
+            .split('.')
+            .map((part) => parseInt(part, 10) || 0);
+    }
+
+    function compareVersions(left, right) {
+        const a = parseVersion(left);
+        const b = parseVersion(right);
+        const length = Math.max(a.length, b.length);
+        for (let index = 0; index < length; index += 1) {
+            const delta = (a[index] || 0) - (b[index] || 0);
+            if (delta !== 0) {
+                return delta;
+            }
+        }
+        return 0;
+    }
+
     async function fetchVersionStatus(serverUrl) {
         const versionState = {
             latestAddonVersion: null,
@@ -149,7 +168,8 @@
             currentServerVersion: null,
             addonOutdated: false,
             serverOutdated: false,
-            command: [],
+            serverCommand: [],
+            allCommand: [],
             error: null,
         };
 
@@ -161,8 +181,11 @@
                 versionState.latestServerVersion = payload.latestVersion || null;
                 versionState.latestAddonVersion = payload.latestAddonVersion || payload.latestVersion || null;
                 versionState.serverOutdated = !!payload.updateAvailable;
-                versionState.addonOutdated = false;
-                versionState.command = Array.isArray(payload.command) ? payload.command : [];
+                versionState.addonOutdated = versionState.latestAddonVersion
+                    ? compareVersions(versionState.latestAddonVersion, ADDON_INFO.version) > 0
+                    : false;
+                versionState.serverCommand = Array.isArray(payload.serverCommand) ? payload.serverCommand : [];
+                versionState.allCommand = Array.isArray(payload.allCommand) ? payload.allCommand : [];
             }
         } catch (error) {
             versionState.error = error.message;
@@ -182,6 +205,7 @@
             const [status, setStatus] = useState(null);
             const [versionStatus, setVersionStatus] = useState(null);
             const [updateStatus, setUpdateStatus] = useState(null);
+            const [updateAllStatus, setUpdateAllStatus] = useState(null);
 
             const saveUrl = (value) => {
                 setServerUrl(value);
@@ -216,6 +240,18 @@
                     setUpdateStatus(response.ok ? 'scheduled' : 'failed');
                 } catch {
                     setUpdateStatus('failed');
+                }
+            };
+
+            const runUpdateAll = async () => {
+                setUpdateAllStatus('updating');
+                try {
+                    const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/update/apply-all', 10000, {
+                        method: 'POST',
+                    });
+                    setUpdateAllStatus(response.ok ? 'scheduled' : 'failed');
+                } catch {
+                    setUpdateAllStatus('failed');
                 }
             };
 
@@ -309,17 +345,27 @@
                 ),
                 updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
                     React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'Run the commands below to update the server and addon:'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'You can update just the server, or update the server, addon file, and run spicetify apply together.'),
                     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
                         React.createElement('button', {
                             style: button,
                             onClick: runUpdate,
                             disabled: updateStatus === 'updating',
                         }, updateStatus === 'updating' ? 'Updating...' : 'Update now'),
+                        React.createElement('button', {
+                            style: button,
+                            onClick: runUpdateAll,
+                            disabled: updateAllStatus === 'updating',
+                        }, updateAllStatus === 'updating' ? 'Updating all...' : 'Update all'),
                         updateStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Scheduled'),
-                        updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed')
+                        updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed'),
+                        updateAllStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'All scheduled'),
+                        updateAllStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update all failed')
                     ),
-                    React.createElement('div', { style: commandBox }, (versionStatus.command || []).join('\n'))
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Server only'),
+                    React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\n')),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all'),
+                    React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\n'))
                 ),
                 versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },
                     `Version check failed: ${versionStatus.error}`
