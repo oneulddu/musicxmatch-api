@@ -92,6 +92,64 @@ cargo run
 curl http://127.0.0.1:8092/health
 ```
 
+## 업데이트
+
+최신 버전으로 올리려면 설치 스크립트를 다시 실행한 뒤 서버를 재시작하세요.
+
+### Windows
+
+```powershell
+iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex
+spicetify apply
+```
+
+서버 재시작:
+
+```powershell
+Start-ScheduledTask -TaskName "ivLyrics-MusicXMatch"
+```
+
+### macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
+spicetify apply
+```
+
+서버 재시작:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.ivlyrics.musicxmatch
+```
+
+Linux(systemd user)에서는:
+
+```bash
+systemctl --user restart ivlyrics-musicxmatch
+```
+
+## CORS / Health 확인
+
+Spotify 웹뷰에서 로컬 서버를 읽으려면 CORS 헤더가 있어야 합니다. 아래 응답에 `access-control-allow-origin: *`가 보여야 정상입니다.
+
+```bash
+curl -i http://127.0.0.1:8092/health
+```
+
+정상 응답 예시:
+
+```text
+HTTP/1.1 200 OK
+access-control-allow-origin: *
+content-type: application/json
+```
+
+가사 요청도 직접 확인할 수 있습니다.
+
+```bash
+curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%94%BD%ED%95%98%EC%9D%B4"
+```
+
 ## 로그
 
 기본 로그 파일 위치:
@@ -105,4 +163,10 @@ Windows에서 로그를 실시간으로 보려면:
 
 ```powershell
 Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.log" -Wait
+```
+
+macOS/Linux:
+
+```bash
+tail -f ~/.ivlyrics-musicxmatch/server.log
 ```

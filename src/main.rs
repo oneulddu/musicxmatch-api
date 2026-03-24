@@ -654,3 +654,42 @@ fn map_error(error: MxmError) -> (StatusCode, String) {
         other => (StatusCode::BAD_GATEWAY, other.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_to_words_preserves_unicode_letters() {
+        assert_eq!(collapse_to_words("에픽하이 feat. 융진"), "에픽하이 feat 융진");
+        assert_eq!(collapse_to_words("끊었어? (demo)"), "끊었어 demo");
+    }
+
+    #[test]
+    fn title_variants_include_search_fallback_forms() {
+        let variants = title_variants("끊었어? (demo)");
+        assert!(variants.iter().any(|value| value == "끊었어? (demo)"));
+        assert!(variants.iter().any(|value| value == "끊었어"));
+        assert!(variants.iter().any(|value| value == "끊었어 demo"));
+    }
+
+    #[test]
+    fn artist_variants_strip_featured_and_split_collaborators() {
+        let variants = artist_variants("Epik High feat. Yoong Jin of Casker");
+        assert!(variants.iter().any(|value| value == "Epik High feat. Yoong Jin of Casker"));
+        assert!(variants.iter().any(|value| value == "Epik High"));
+    }
+
+    #[test]
+    fn normalize_connectors_expands_symbols() {
+        assert_eq!(normalize_connectors("A&B"), "A and B");
+        assert_eq!(normalize_connectors("A/B"), "A B");
+        assert_eq!(normalize_connectors("A×B"), "A x B");
+    }
+
+    #[test]
+    fn simplify_drops_brackets_and_preserves_korean() {
+        assert_eq!(simplify("Love Love Love (feat. 융진)"), "love love love");
+        assert_eq!(simplify("끊었어? (demo)"), "끊었어");
+    }
+}
