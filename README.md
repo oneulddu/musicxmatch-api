@@ -8,6 +8,7 @@ MusicXMatch 가사 제공자 애드온 for ivLyrics
 - ✅ 일반 가사 지원
 - ✅ Spotify Track ID 우선 매칭
 - ✅ 자동 트랙 매칭 (Android API 기반)
+- ✅ 선택적 Deezer fallback 지원
 - ✅ 캐싱 (30분)
 - ✅ Rust 단일 바이너리 서버
 
@@ -79,6 +80,30 @@ Windows: %LocalAppData%\spicetify\CustomApps\ivLyrics
 3. Spicetify extension으로 `Addon_Lyrics_MusicXMatch.js`가 등록되어 있어야 합니다
 4. ivLyrics 설정에서 MusicXMatch 애드온 활성화
 5. 서버 URL 확인: `http://127.0.0.1:8092`
+
+## Deezer fallback 설정
+
+Musixmatch에서 못 찾는 곡을 Deezer로 한 번 더 시도할 수 있습니다.
+
+설정 방법:
+1. Deezer 웹 플레이어에 로그인
+2. 브라우저 개발자 도구의 쿠키에서 `arl` 값을 복사
+3. ivLyrics의 `MusicXMatch Provider` 설정 화면에서 `Deezer fallback` 입력칸에 붙여넣고 저장
+
+저장 위치:
+
+```text
+Windows: %USERPROFILE%\.ivlyrics-musicxmatch\config.json
+macOS/Linux: ~/.ivlyrics-musicxmatch/config.json
+```
+
+원하면 환경 변수로도 줄 수 있습니다.
+
+```text
+DEEZER_ARL=<your_cookie_value>
+```
+
+환경 변수 `DEEZER_ARL`이 있으면 설정 파일보다 우선합니다.
 
 ## 수동 설치
 
@@ -212,6 +237,7 @@ version
 provider
 backend
 cors
+deezerConfigured
 cacheEntries
 sessionFile
 logFile
@@ -235,6 +261,8 @@ curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%
 debug.source
 debug.matchedBy
 debug.durationMs
+debug.selectedTrackId
+debug.selectedTrackDurationMs
 debug.searchVariants
 ```
 
@@ -254,6 +282,15 @@ curl -X POST http://127.0.0.1:8092/update/apply
 
 ```bash
 curl -X POST http://127.0.0.1:8092/update/apply-all
+```
+
+Deezer 설정 상태를 확인하거나 저장하려면:
+
+```bash
+curl http://127.0.0.1:8092/config
+curl -X POST http://127.0.0.1:8092/config \
+  -H 'Content-Type: application/json' \
+  -d '{"deezerArl":"YOUR_ARL_COOKIE"}'
 ```
 
 ## 로그

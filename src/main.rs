@@ -1,3 +1,5 @@
+mod deezer;
+
 use std::collections::HashMap;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
@@ -14,6 +16,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use deezer::{DeezerClient, DeezerError, DeezerTrack};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -23,12 +26,16 @@ use tower_http::cors::{Any, CorsLayer};
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
+const DEEZER_PROVIDER_NAME: &str = "deezer";
 const VERSION_INFO_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
 
 #[derive(Clone)]
 struct AppState {
     mxm: Musixmatch,
+    deezer: DeezerClient,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    config: Arc<Mutex<AppConfig>>,
+    config_path: PathBuf,
     logger: Logger,
 }
 
@@ -57,6 +64,8 @@ struct HealthPayload {
     provider: &'static str,
     backend: &'static str,
     cors: bool,
+    #[serde(rename = "deezerConfigured")]
+    deezer_configured: bool,
     #[serde(rename = "cacheEntries")]
     cache_entries: usize,
     #[serde(rename = "sessionFile")]
@@ -108,6 +117,32 @@ struct VersionInfo {
     addon: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+struct AppConfig {
+    #[serde(rename = "deezerArl", default)]
+    deezer_arl: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigPayload {
+    #[serde(rename = "deezerArlConfigured")]
+    deezer_arl_configured: bool,
+    #[serde(rename = "deezerArlPreview")]
+    deezer_arl_preview: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigUpdatePayload {
+    #[serde(rename = "deezerArl")]
+    deezer_arl: Option<String>,
+}
+
+#[derive(Debug)]
+enum LyricsError {
+    Musixmatch(MxmError),
+    Deezer(DeezerError),
+}
+
 #[derive(Debug, Serialize)]
 struct UpdateCheckPayload {
     #[serde(rename = "currentVersion")]
@@ -146,10 +181,14 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
+    let config_path = config_file_path();
 
     let state = AppState {
         mxm: build_client(),
+        deezer: DeezerClient::new(),
         cache: Arc::new(Mutex::new(HashMap::new())),
+        config: Arc::new(Mutex::new(load_config(&config_path))),
+        config_path,
         logger: logger.clone(),
     };
 
@@ -157,6 +196,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/lyrics", get(get_lyrics))
         .route("/cache", delete(clear_cache))
+        .route("/config", get(get_config).post(save_config))
         .route("/update/check", get(update_check))
         .route("/update/apply", post(update_apply))
         .route("/update/apply-all", post(update_apply_all))
@@ -210,6 +250,33 @@ fn log_file_path() -> PathBuf {
     path
 }
 
+fn config_file_path() -> PathBuf {
+    if let Ok(value) = std::env::var("IVLYRICS_MXM_CONFIG") {
+        return PathBuf::from(value);
+    }
+
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".ivlyrics-musicxmatch");
+    path.push("config.json");
+    path
+}
+
+fn load_config(path: &PathBuf) -> AppConfig {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => AppConfig::default(),
+    }
+}
+
+fn save_config_file(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
 impl Logger {
     fn new(path: PathBuf) -> Self {
         if let Some(parent) = path.parent() {
@@ -260,6 +327,7 @@ where
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log("GET /health");
     let cache_entries = state.cache.lock().await.len();
+    let deezer_configured = current_deezer_arl(&state).await.is_some();
     let update_available = latest_version_info()
         .await
         .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
@@ -268,8 +336,9 @@ async fn health(State(state): State<AppState>) -> Response {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         provider: PROVIDER_NAME,
-        backend: "musixmatch-inofficial",
+        backend: "musixmatch-inofficial + deezer(optional)",
         cors: true,
+        deezer_configured,
         cache_entries,
         session_file: session_file_path().display().to_string(),
         log_file: log_file_path().display().to_string(),
@@ -283,6 +352,40 @@ async fn clear_cache(State(state): State<AppState>) -> Response {
     let deleted = cache.len();
     cache.clear();
     json_response(StatusCode::OK, serde_json::json!({ "deleted": deleted }))
+}
+
+async fn get_config(State(state): State<AppState>) -> Response {
+    state.logger.log("GET /config");
+    json_response(StatusCode::OK, runtime_config_payload(&state).await)
+}
+
+async fn save_config(
+    State(state): State<AppState>,
+    Json(payload): Json<ConfigUpdatePayload>,
+) -> Response {
+    state.logger.log("POST /config");
+
+    let next_arl = payload
+        .deezer_arl
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let next = AppConfig {
+        deezer_arl: next_arl,
+    };
+
+    if let Err(error) = save_config_file(&state.config_path, &next) {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorPayload {
+                detail: error,
+            },
+        );
+    }
+
+    *state.config.lock().await = next.clone();
+    state.deezer.clear_token().await;
+    json_response(StatusCode::OK, config_payload(&next))
 }
 
 async fn get_lyrics(
@@ -317,19 +420,11 @@ async fn get_lyrics(
         return json_response(StatusCode::OK, cached);
     }
 
-    match fetch_payload(
-        &state.mxm,
-        &title,
-        &artist,
-        &spotify_id,
-        duration_secs,
-        include_debug,
-    )
-    .await
-    {
+    match fetch_payload(&state, &title, &artist, &spotify_id, duration_secs, include_debug).await {
         Ok(mut payload) => {
             state.logger.log(&format!(
-                "lyrics resolved track_id={:?} track_name={:?} has_lrc={} has_text={}",
+                "lyrics resolved provider={} track_id={:?} track_name={:?} has_lrc={} has_text={}",
+                payload.provider,
                 payload.track_id,
                 payload.track_name,
                 payload.lrc.is_some(),
@@ -476,6 +571,71 @@ fn current_platform() -> &'static str {
     }
 }
 
+async fn current_deezer_arl(state: &AppState) -> Option<String> {
+    if let Ok(value) = std::env::var("DEEZER_ARL") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    state
+        .config
+        .lock()
+        .await
+        .deezer_arl
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn config_payload(config: &AppConfig) -> ConfigPayload {
+    ConfigPayload {
+        deezer_arl_configured: config
+            .deezer_arl
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        deezer_arl_preview: config
+            .deezer_arl
+            .as_deref()
+            .map(mask_secret)
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+async fn runtime_config_payload(state: &AppState) -> ConfigPayload {
+    if let Ok(value) = std::env::var("DEEZER_ARL") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return ConfigPayload {
+                deezer_arl_configured: true,
+                deezer_arl_preview: Some(mask_secret(trimmed)),
+            };
+        }
+    }
+
+    let config = state.config.lock().await.clone();
+    config_payload(&config)
+}
+
+fn mask_secret(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    if chars.len() <= 8 {
+        return "••••".to_string();
+    }
+
+    let prefix = chars.iter().take(4).collect::<String>();
+    let suffix = chars.iter().rev().take(4).collect::<Vec<_>>();
+    let suffix = suffix.into_iter().rev().collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
 fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
@@ -580,6 +740,46 @@ fn build_cache_key(title: &str, artist: &str, spotify_id: &str) -> String {
 }
 
 async fn fetch_payload(
+    state: &AppState,
+    title: &str,
+    artist: &str,
+    spotify_id: &str,
+    duration_secs: Option<f32>,
+    include_debug: bool,
+) -> Result<LyricsPayload, LyricsError> {
+    match fetch_musixmatch_payload(
+        &state.mxm,
+        title,
+        artist,
+        spotify_id,
+        duration_secs,
+        include_debug,
+    )
+    .await
+    {
+        Ok(payload) => return Ok(payload),
+        Err(error) => {
+            state
+                .logger
+                .log(&format!("musixmatch lookup failed, trying Deezer fallback: {error}"));
+            if let Some(arl) = current_deezer_arl(state).await {
+                return fetch_deezer_payload(
+                    &state.deezer,
+                    &arl,
+                    title,
+                    artist,
+                    duration_secs,
+                    include_debug,
+                )
+                .await
+                .map_err(LyricsError::Deezer);
+            }
+            return Err(LyricsError::Musixmatch(error));
+        }
+    }
+}
+
+async fn fetch_musixmatch_payload(
     mxm: &Musixmatch,
     title: &str,
     artist: &str,
@@ -685,8 +885,53 @@ async fn fetch_by_id(
     })
 }
 
+async fn fetch_deezer_payload(
+    deezer: &DeezerClient,
+    arl: &str,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+    include_debug: bool,
+) -> Result<LyricsPayload, DeezerError> {
+    let resolution = resolve_deezer_tracks(deezer, title, artist, duration_secs).await?;
+
+    for track in resolution.tracks {
+        match deezer.fetch_lyrics_for_track(arl, &track).await {
+            Ok(payload) => {
+                return Ok(LyricsPayload {
+                    provider: DEEZER_PROVIDER_NAME,
+                    track_id: Some(payload.track_id),
+                    track_name: Some(payload.track_name),
+                    artist_name: Some(payload.artist_name),
+                    lrc: payload.lrc,
+                    text: payload.text,
+                    cached: false,
+                    debug: include_debug.then(|| DebugPayload {
+                        source: "deezer_search",
+                        matched_by: resolution.matched_by,
+                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+                        selected_track_id: Some(payload.track_id),
+                        selected_track_duration_ms: payload.duration_ms,
+                        search_variants: resolution.search_variants.clone(),
+                    }),
+                });
+            }
+            Err(DeezerError::NotFound | DeezerError::NotAvailable) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(DeezerError::NotAvailable)
+}
+
 struct TrackResolution {
     track: Track,
+    matched_by: &'static str,
+    search_variants: Vec<String>,
+}
+
+struct DeezerTrackResolution {
+    tracks: Vec<DeezerTrack>,
     matched_by: &'static str,
     search_variants: Vec<String>,
 }
@@ -773,6 +1018,64 @@ async fn resolve_track(
         .ok_or(MxmError::NotFound)
 }
 
+async fn resolve_deezer_tracks(
+    deezer: &DeezerClient,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> Result<DeezerTrackResolution, DeezerError> {
+    let mut tracks_by_id = HashMap::new();
+    let title_variants = title_variants(title);
+    let artist_variants = artist_variants(artist);
+    let mut attempted_variants = Vec::new();
+    let mut matched_by = "search:title+artist";
+
+    for title_variant in &title_variants {
+        for artist_variant in &artist_variants {
+            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
+            let tracks = deezer
+                .search_tracks(Some(title_variant), Some(artist_variant))
+                .await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
+        matched_by = "search:title";
+        for title_variant in &title_variants {
+            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
+            let tracks = deezer.search_tracks(Some(title_variant), None).await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        return Err(DeezerError::NotFound);
+    }
+
+    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        score_deezer_track(right, title, artist, duration_secs)
+            .partial_cmp(&score_deezer_track(left, title, artist, duration_secs))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.retain(|track| is_acceptable_deezer_match(track, title, artist, matched_by));
+
+    if candidates.is_empty() {
+        return Err(DeezerError::NotFound);
+    }
+
+    Ok(DeezerTrackResolution {
+        tracks: candidates,
+        matched_by,
+        search_variants: attempted_variants,
+    })
+}
+
 async fn search_tracks(
     mxm: &Musixmatch,
     title: Option<&str>,
@@ -792,6 +1095,77 @@ async fn search_tracks(
         .s_track_rating(SortOrder::Desc)
         .send(10, 1)
         .await
+}
+
+fn score_deezer_track(track: &DeezerTrack, title: &str, artist: &str, duration_secs: Option<f32>) -> f32 {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let mut score = similarity(&want_title, &track_title) * 70.0
+        + similarity(&want_artist, &track_artist) * 30.0;
+
+    if want_title == track_title {
+        score += 15.0;
+    } else if track_title.contains(&want_title) {
+        score += 8.0;
+    }
+
+    if want_artist == track_artist || track_artist.contains(&want_artist) {
+        score += 10.0;
+    }
+
+    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
+        let actual_duration = actual_ms as f32 / 1000.0;
+        score += duration_score((actual_duration - want_duration).abs());
+    }
+
+    let noise = format!("{track_title} {track_artist}");
+    for word in [
+        "acoustic",
+        "cover",
+        "instrumental",
+        "karaoke",
+        "live",
+        "remix",
+        "tribute",
+    ] {
+        if noise.contains(word) {
+            score -= 18.0;
+        }
+    }
+
+    score
+}
+
+fn is_acceptable_deezer_match(
+    track: &DeezerTrack,
+    title: &str,
+    artist: &str,
+    matched_by: &str,
+) -> bool {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let title_similarity = similarity(&want_title, &track_title);
+    let artist_similarity = if want_artist.is_empty() {
+        1.0
+    } else {
+        similarity(&want_artist, &track_artist)
+    };
+    let artist_contains = !want_artist.is_empty()
+        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+
+    match matched_by {
+        "search:title" => {
+            title_similarity >= 0.8
+                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+        }
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+    }
 }
 
 fn title_variants(title: &str) -> Vec<String> {
@@ -1031,8 +1405,29 @@ fn strip_lyrics_footer(value: &str) -> String {
         .to_string()
 }
 
-fn map_error(error: MxmError) -> (StatusCode, String) {
+fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
+        LyricsError::Deezer(DeezerError::ConfigMissing) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Deezer ARL cookie is not configured.".to_string(),
+        ),
+        LyricsError::Deezer(DeezerError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            "No tracks found".to_string(),
+        ),
+        LyricsError::Deezer(DeezerError::NotAvailable) => (
+            StatusCode::NOT_FOUND,
+            "No lyrics are available for this track".to_string(),
+        ),
+        LyricsError::Deezer(DeezerError::Auth(detail)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Deezer authentication failed: {detail}"),
+        ),
+        LyricsError::Deezer(DeezerError::Provider(detail)) => (
+            StatusCode::BAD_GATEWAY,
+            format!("Deezer error: {detail}"),
+        ),
+        LyricsError::Musixmatch(error) => match error {
         MxmError::NotFound => (StatusCode::NOT_FOUND, "No tracks found".to_string()),
         MxmError::NotAvailable => (
             StatusCode::NOT_FOUND,
@@ -1059,6 +1454,7 @@ fn map_error(error: MxmError) -> (StatusCode, String) {
             format!("Musixmatch error {status_code}: {msg}"),
         ),
         other => (StatusCode::BAD_GATEWAY, other.to_string()),
+        },
     }
 }
 
@@ -1123,5 +1519,18 @@ mod tests {
         assert!(compare_versions("0.3.2", "0.3.1") > 0);
         assert!(compare_versions("0.3.1", "0.3.2") < 0);
         assert_eq!(compare_versions("0.3.1", "0.3.1"), 0);
+    }
+
+    #[test]
+    fn mask_secret_preserves_only_edges() {
+        assert_eq!(mask_secret(""), "");
+        assert_eq!(mask_secret("abcd"), "••••");
+        assert_eq!(mask_secret("abcdefghijkl"), "abcd…ijkl");
+    }
+
+    #[test]
+    fn deezer_short_titles_follow_same_title_only_rule() {
+        assert!(!can_use_title_only_fallback("KO"));
+        assert!(can_use_title_only_fallback("신호는 잘 지켜"));
     }
 }
