@@ -16,7 +16,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -46,6 +46,7 @@ struct LyricsQuery {
     spotify_id: Option<String>,
     #[serde(alias = "durationMs")]
     duration_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_boolish_opt")]
     debug: Option<bool>,
 }
 
@@ -238,6 +239,21 @@ fn timestamp_string() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().to_string(),
         Err(_) => "0".to_string(),
+    }
+}
+
+fn deserialize_boolish_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("1") | Some("true") | Some("TRUE") | Some("True") => Ok(Some(true)),
+        Some("0") | Some("false") | Some("FALSE") | Some("False") => Ok(Some(false)),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "provided string was not `true` or `false`: {other}"
+        ))),
     }
 }
 
@@ -697,7 +713,7 @@ async fn resolve_track(
         }
     }
 
-    if tracks_by_id.is_empty() {
+    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
         matched_by = "search:title";
         for title_variant in &title_variants {
             attempted_variants.push(format!("title={title_variant} | artist=<none>"));
@@ -748,6 +764,7 @@ async fn resolve_track(
                 .partial_cmp(&score_track(right, title, artist, duration_secs))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
+        .filter(|track| is_acceptable_match(track, title, artist, matched_by))
         .map(|track| TrackResolution {
             track,
             matched_by,
@@ -974,6 +991,37 @@ fn duration_score(delta_secs: f32) -> f32 {
     }
 }
 
+fn can_use_title_only_fallback(title: &str) -> bool {
+    let simplified = simplify(title);
+    let compact_len = simplified.chars().filter(|ch| !ch.is_whitespace()).count();
+    let has_non_ascii = simplified.chars().any(|ch| !ch.is_ascii());
+    let word_count = simplified.split_whitespace().count();
+    compact_len >= 4 || word_count >= 2 || (has_non_ascii && compact_len >= 3)
+}
+
+fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by: &str) -> bool {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let title_similarity = similarity(&want_title, &track_title);
+    let artist_similarity = if want_artist.is_empty() {
+        1.0
+    } else {
+        similarity(&want_artist, &track_artist)
+    };
+    let artist_contains = !want_artist.is_empty()
+        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+
+    match matched_by {
+        "search:title" => title_similarity >= 0.8 && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains),
+        "search:artist" => artist_similarity >= 0.5 && title_similarity >= 0.3,
+        "matcher:original" | "matcher:variants" => title_similarity >= 0.45 || artist_similarity >= 0.45,
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+    }
+}
+
 fn strip_lyrics_footer(value: &str) -> String {
     value
         .split("\n\n*******")
@@ -1060,5 +1108,20 @@ mod tests {
         assert_eq!(duration_score(12.0), -8.0);
         assert_eq!(duration_score(24.0), -20.0);
         assert_eq!(duration_score(8.0), 0.0);
+    }
+
+    #[test]
+    fn short_single_word_titles_do_not_use_title_only_fallback() {
+        assert!(!can_use_title_only_fallback("KO"));
+        assert!(!can_use_title_only_fallback("VVS"));
+        assert!(can_use_title_only_fallback("Love Love Love"));
+        assert!(can_use_title_only_fallback("끊었어?"));
+    }
+
+    #[test]
+    fn compare_versions_handles_semver_like_strings() {
+        assert!(compare_versions("0.3.2", "0.3.1") > 0);
+        assert!(compare_versions("0.3.1", "0.3.2") < 0);
+        assert_eq!(compare_versions("0.3.1", "0.3.1"), 0);
     }
 }

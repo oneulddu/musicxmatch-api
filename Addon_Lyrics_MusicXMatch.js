@@ -17,7 +17,7 @@
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
         author: 'oneulddu',
-        version: '0.3.1',
+        version: '0.3.2',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
         },
