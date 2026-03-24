@@ -35,6 +35,15 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 
 `Addon_Lyrics_MusicXMatch.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
 
+### Windows
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\spicetify\Extensions" | Out-Null
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js"
+spicetify config extensions Addon_Lyrics_MusicXMatch.js
+spicetify apply
+```
+
 ### macOS / Linux
 
 ```bash
@@ -48,12 +57,14 @@ spicetify apply
 애드온 파일 위치:
 
 ```text
+Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
 ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
 ```
 
 ivLyrics 앱 폴더 위치:
 
 ```text
+Windows: %LocalAppData%\spicetify\CustomApps\ivLyrics
 ~/.config/spicetify/CustomApps/ivLyrics
 ```
 
