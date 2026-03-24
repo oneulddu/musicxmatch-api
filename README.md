@@ -91,9 +91,3 @@ cargo run
 ```bash
 curl http://127.0.0.1:8092/health
 ```
-
----
-
-## Python API (Legacy)
-
-Python 버전은 `legacy/` 폴더에 있습니다.
