@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ const PROVIDER_NAME: &str = "musicxmatch";
 struct AppState {
     mxm: Musixmatch,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    logger: Logger,
 }
 
 #[derive(Clone)]
@@ -67,8 +70,16 @@ struct ErrorPayload {
     detail: String,
 }
 
+#[derive(Clone)]
+struct Logger {
+    file: Arc<std::sync::Mutex<Option<std::fs::File>>>,
+}
+
 #[tokio::main]
 async fn main() {
+    let logger = Logger::new(log_file_path());
+    logger.log("server boot");
+
     let port = std::env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -77,6 +88,7 @@ async fn main() {
     let state = AppState {
         mxm: build_client(),
         cache: Arc::new(Mutex::new(HashMap::new())),
+        logger: logger.clone(),
     };
 
     let app = Router::new()
@@ -86,11 +98,13 @@ async fn main() {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    logger.log(&format!("binding to {addr}"));
     println!("ivLyrics MusicXMatch Server listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
+    logger.log("listener bound successfully");
     axum::serve(listener, app)
         .await
         .expect("server exited unexpectedly");
@@ -119,7 +133,51 @@ fn session_file_path() -> PathBuf {
     path
 }
 
-async fn health() -> Json<HealthPayload> {
+fn log_file_path() -> PathBuf {
+    if let Ok(value) = std::env::var("IVLYRICS_MXM_LOG") {
+        return PathBuf::from(value);
+    }
+
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".ivlyrics-musicxmatch");
+    path.push("server.log");
+    path
+}
+
+impl Logger {
+    fn new(path: PathBuf) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = create_dir_all(parent);
+        }
+
+        let file = OpenOptions::new().create(true).append(true).open(path).ok();
+        Self {
+            file: Arc::new(std::sync::Mutex::new(file)),
+        }
+    }
+
+    fn log(&self, message: &str) {
+        let line = format!("[{}] {message}\n", timestamp_string());
+        print!("{line}");
+        if let Ok(mut guard) = self.file.lock() {
+            if let Some(file) = guard.as_mut() {
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+            }
+        }
+    }
+}
+
+fn timestamp_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs().to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
+async fn health(State(state): State<AppState>) -> Json<HealthPayload> {
+    state.logger.log("GET /health");
     Json(HealthPayload {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -129,6 +187,7 @@ async fn health() -> Json<HealthPayload> {
 }
 
 async fn clear_cache(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.logger.log("DELETE /cache");
     let mut cache = state.cache.lock().await;
     let deleted = cache.len();
     cache.clear();
@@ -143,8 +202,14 @@ async fn get_lyrics(
     let artist = query.artist.unwrap_or_default().trim().to_string();
     let spotify_id = query.spotify_id.unwrap_or_default().trim().to_string();
     let duration_secs = query.duration_ms.map(|value| value as f32 / 1000.0);
+    state.logger.log(&format!(
+        "GET /lyrics title={title:?} artist={artist:?} spotify_id={spotify_id:?}"
+    ));
 
     if spotify_id.is_empty() && (title.is_empty() || artist.is_empty()) {
+        state
+            .logger
+            .log("rejecting /lyrics request because title/artist are missing");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorPayload {
@@ -156,17 +221,29 @@ async fn get_lyrics(
 
     let cache_key = build_cache_key(&title, &artist, &spotify_id);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
+        state.logger.log(&format!("cache hit for key={cache_key}"));
         return (StatusCode::OK, Json(cached)).into_response();
     }
 
     match fetch_payload(&state.mxm, &title, &artist, &spotify_id, duration_secs).await {
         Ok(mut payload) => {
+            state.logger.log(&format!(
+                "lyrics resolved track_id={:?} track_name={:?} has_lrc={} has_text={}",
+                payload.track_id,
+                payload.track_name,
+                payload.lrc.is_some(),
+                payload.text.is_some()
+            ));
             payload.cached = false;
             store_cache(&state, cache_key, payload.clone()).await;
             (StatusCode::OK, Json(payload)).into_response()
         }
         Err(error) => {
             let (status, detail) = map_error(error);
+            state.logger.log(&format!(
+                "lyrics request failed status={} detail={detail}",
+                status.as_u16()
+            ));
             (status, Json(ErrorPayload { detail })).into_response()
         }
     }

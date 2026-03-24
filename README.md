@@ -91,3 +91,18 @@ cargo run
 ```bash
 curl http://127.0.0.1:8092/health
 ```
+
+## 로그
+
+기본 로그 파일 위치:
+
+```text
+Windows: %USERPROFILE%\.ivlyrics-musicxmatch\server.log
+macOS/Linux: ~/.ivlyrics-musicxmatch/server.log
+```
+
+Windows에서 로그를 실시간으로 보려면:
+
+```powershell
+Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.log" -Wait
+```
