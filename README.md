@@ -28,17 +28,57 @@ iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
+이 명령은 로컬 서버를 `~/.ivlyrics-musicxmatch`에 설치하고, `http://localhost:8092`로 자동 시작되도록 설정합니다.
+
+## ivLyrics 애드온 추가
+
+`Addon_Lyrics_MusicXMatch.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
+
+### macOS / Linux
+
+```bash
+mkdir -p ~/.config/spicetify/Extensions
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js \
+  -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+spicetify config extensions Addon_Lyrics_MusicXMatch.js
+spicetify apply
+```
+
+애드온 파일 위치:
+
+```text
+~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+```
+
+ivLyrics 앱 폴더 위치:
+
+```text
+~/.config/spicetify/CustomApps/ivLyrics
+```
+
+이미 다른 extension을 사용 중이면 `spicetify config extensions` 값을 덮어쓰지 않도록 기존 목록에 `Addon_Lyrics_MusicXMatch.js`를 추가하세요.
+
 ## 사용법
 
 1. 서버가 자동으로 시작됩니다 (http://localhost:8092)
-2. ivLyrics 설정에서 MusicXMatch 애드온 활성화
-3. 서버 URL 확인: `http://localhost:8092`
+2. ivLyrics가 `~/.config/spicetify/CustomApps/ivLyrics`에 설치되어 있어야 합니다
+3. Spicetify extension으로 `Addon_Lyrics_MusicXMatch.js`가 등록되어 있어야 합니다
+4. ivLyrics 설정에서 MusicXMatch 애드온 활성화
+5. 서버 URL 확인: `http://localhost:8092`
 
 ## 수동 설치
+
+서버만 직접 실행하려면:
 
 ```bash
 npm install
 node server.js
+```
+
+서버 상태 확인:
+
+```bash
+curl http://127.0.0.1:8092/health
 ```
 
 ---
@@ -46,5 +86,4 @@ node server.js
 ## Python API (Legacy)
 
 Python 버전은 `legacy/` 폴더에 있습니다.
-
 
