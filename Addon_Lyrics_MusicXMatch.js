@@ -1,8 +1,9 @@
 /**
  * @addon-type  lyrics
  * @id          musicxmatch-provider
+ * @name        MusicXMatch Provider
  * @version     0.1.0
- * @author      Strvm
+ * @author      oneulddu
  */
 
 (() => {
@@ -15,7 +16,7 @@
     const ADDON_INFO = {
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
-        author: 'Strvm',
+        author: 'oneulddu',
         version: '0.1.0',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
@@ -166,7 +167,7 @@
                     placeholder: DEFAULT_SERVER_URL,
                     onChange: (event) => saveUrl(event.target.value),
                 }),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local Python server and point this addon to it.'),
+                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local Node server and point this addon to it.'),
                 React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, `Timeout: ${timeoutSec}s`),
                 React.createElement('input', {
                     type: 'range',

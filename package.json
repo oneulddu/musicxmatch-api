@@ -7,7 +7,7 @@
     "start": "node server.js"
   },
   "keywords": ["ivlyrics", "musicxmatch", "lyrics"],
-  "author": "Strvm",
+  "author": "oneulddu",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
