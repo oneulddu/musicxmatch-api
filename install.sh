@@ -91,7 +91,7 @@ if [[ -z "$HEALTH_HEADERS" ]]; then
     exit 1
 fi
 
-echo "$HEALTH_HEADERS" | grep -qi '^access-control-allow-origin: \*$' || {
+echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*$' || {
     echo "CORS header check failed: access-control-allow-origin: * not found"
     exit 1
 }
