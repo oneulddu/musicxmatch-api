@@ -4,10 +4,21 @@
       "name": "MusicXMatch Provider",
       "type": "lyrics",
       "author": "oneulddu",
-      "version": "0.4.4",
+      "version": "0.5.0",
       "updated": "2026-03-25",
       "description": "Fetches synced or plain lyrics from a local MusicXMatch bridge server.",
       "downloadUrl": "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js",
+      "githubUrl": "https://github.com/oneulddu/musicxmatch-api",
+      "minAppVersion": "3.1.0"
+    },
+    {
+      "name": "Deezer Provider",
+      "type": "lyrics",
+      "author": "oneulddu",
+      "version": "0.4.4",
+      "updated": "2026-03-25",
+      "description": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
+      "downloadUrl": "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js",
       "githubUrl": "https://github.com/oneulddu/musicxmatch-api",
       "minAppVersion": "3.1.0"
     }

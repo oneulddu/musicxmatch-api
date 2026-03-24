@@ -19,11 +19,17 @@ fi
 perl -0pi -e "s/version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"/version = \"$VERSION\"/" \
     "$ROOT_DIR/Cargo.toml"
 
-perl -0pi -e "s/\\*\\s+@version\\s+[0-9]+\\.[0-9]+\\.[0-9]+/ * @version     $VERSION/" \
+perl -0pi -e "s/\\*\\s+\\@version\\s+[0-9]+\\.[0-9]+\\.[0-9]+/ * \\@version     $VERSION/" \
     "$ROOT_DIR/Addon_Lyrics_MusicXMatch.js"
 
 perl -0pi -e "s/version: '[0-9]+\\.[0-9]+\\.[0-9]+'/version: '$VERSION'/" \
     "$ROOT_DIR/Addon_Lyrics_MusicXMatch.js"
+
+perl -0pi -e "s/\\*\\s+\\@version\\s+[0-9]+\\.[0-9]+\\.[0-9]+/ * \\@version     $VERSION/" \
+    "$ROOT_DIR/Addon_Lyrics_Deezer.js"
+
+perl -0pi -e "s/version: '[0-9]+\\.[0-9]+\\.[0-9]+'/version: '$VERSION'/" \
+    "$ROOT_DIR/Addon_Lyrics_Deezer.js"
 
 perl -0pi -e "s/\"version\": \"[0-9]+\\.[0-9]+\\.[0-9]+\"/\"version\": \"$VERSION\"/" \
     "$ROOT_DIR/manifest.json"

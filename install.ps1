@@ -1,13 +1,11 @@
-# ivLyrics MusicXMatch Provider Installer (Windows)
+# ivLyrics Lyrics Providers Installer (Windows)
 
-Write-Host "=== ivLyrics MusicXMatch Provider Installer ===" -ForegroundColor Cyan
+Write-Host "=== ivLyrics Lyrics Providers Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
 $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $ExtensionsDir = "$env:APPDATA\spicetify\Extensions"
-$AddonName = "Addon_Lyrics_MusicXMatch.js"
-$AddonPath = Join-Path $ExtensionsDir $AddonName
-$AddonUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$AddonName"
+$AddonNames = @("Addon_Lyrics_MusicXMatch.js", "Addon_Lyrics_Deezer.js")
 $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $ServerUrl = "http://127.0.0.1:8092"
@@ -50,13 +48,12 @@ if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
     throw "CORS header check failed: Access-Control-Allow-Origin header missing"
 }
 
-Write-Host "[7/7] Installing ivLyrics addon..." -ForegroundColor Yellow
+Write-Host "[7/7] Installing ivLyrics addons..." -ForegroundColor Yellow
 $Spicetify = Get-Command spicetify -ErrorAction SilentlyContinue
 if (-not $Spicetify) {
     Write-Warning "spicetify is not installed or not in PATH. Skipping addon registration."
 } else {
     New-Item -ItemType Directory -Force -Path $ExtensionsDir | Out-Null
-    Invoke-WebRequest -Uri $AddonUrl -OutFile $AddonPath
 
     $CurrentExtensions = (spicetify config extensions 2>$null | Out-String).Trim()
     $ExtensionList = @()
@@ -64,8 +61,15 @@ if (-not $Spicetify) {
         $ExtensionList = $CurrentExtensions -split '\s*\|\s*' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     }
 
-    if ($ExtensionList -notcontains $AddonName) {
-        spicetify config extensions $AddonName | Out-Null
+    foreach ($AddonName in $AddonNames) {
+        $AddonPath = Join-Path $ExtensionsDir $AddonName
+        $AddonUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$AddonName"
+        Invoke-WebRequest -Uri $AddonUrl -OutFile $AddonPath
+
+        if ($ExtensionList -notcontains $AddonName) {
+            spicetify config extensions $AddonName | Out-Null
+            $ExtensionList += $AddonName
+        }
     }
 
     spicetify apply
@@ -74,5 +78,5 @@ if (-not $Spicetify) {
 Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
 Write-Host "Server running at $ServerUrl"
-Write-Host "Addon path: $AddonPath"
+Write-Host "Addon paths: $(Join-Path $ExtensionsDir $AddonNames[0]), $(Join-Path $ExtensionsDir $AddonNames[1])"
 Write-Host ""

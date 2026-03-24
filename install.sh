@@ -1,14 +1,12 @@
 #!/bin/bash
 set -e
 
-echo "=== ivLyrics MusicXMatch Provider Installer ==="
+echo "=== ivLyrics Lyrics Providers Installer ==="
 echo ""
 
 INSTALL_DIR="$HOME/.ivlyrics-musicxmatch"
 EXTENSIONS_DIR="$HOME/.config/spicetify/Extensions"
-ADDON_NAME="Addon_Lyrics_MusicXMatch.js"
-ADDON_PATH="$EXTENSIONS_DIR/$ADDON_NAME"
-ADDON_URL="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$ADDON_NAME"
+ADDON_NAMES=("Addon_Lyrics_MusicXMatch.js" "Addon_Lyrics_Deezer.js")
 SERVICE_LABEL="com.ivlyrics.musicxmatch"
 BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
@@ -96,17 +94,22 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
     exit 1
 }
 
-echo "[7/7] Installing ivLyrics addon..."
+echo "[7/7] Installing ivLyrics addons..."
 if ! command -v spicetify >/dev/null 2>&1; then
     echo "spicetify is not installed or not in PATH. Skipping addon registration."
 else
     mkdir -p "$EXTENSIONS_DIR"
-    curl -fsSL "$ADDON_URL" -o "$ADDON_PATH"
-
     CURRENT_EXTENSIONS="$(spicetify config extensions 2>/dev/null || true)"
-    if ! printf '%s\n' "$CURRENT_EXTENSIONS" | tr '|' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$ADDON_NAME"; then
-        spicetify config extensions "$ADDON_NAME"
-    fi
+    for ADDON_NAME in "${ADDON_NAMES[@]}"; do
+        ADDON_PATH="$EXTENSIONS_DIR/$ADDON_NAME"
+        ADDON_URL="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$ADDON_NAME"
+        curl -fsSL "$ADDON_URL" -o "$ADDON_PATH"
+
+        if ! printf '%s\n' "$CURRENT_EXTENSIONS" | tr '|' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$ADDON_NAME"; then
+            spicetify config extensions "$ADDON_NAME"
+            CURRENT_EXTENSIONS="${CURRENT_EXTENSIONS}${CURRENT_EXTENSIONS:+ | }$ADDON_NAME"
+        fi
+    done
 
     spicetify apply
 fi
@@ -114,5 +117,5 @@ fi
 echo ""
 echo "✓ Installation complete!"
 echo "Server running at $SERVER_URL"
-echo "Addon path: $ADDON_PATH"
+echo "Addon paths: $EXTENSIONS_DIR/${ADDON_NAMES[0]}, $EXTENSIONS_DIR/${ADDON_NAMES[1]}"
 echo ""

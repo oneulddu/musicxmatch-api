@@ -53,6 +53,7 @@ struct LyricsQuery {
     spotify_id: Option<String>,
     #[serde(alias = "durationMs")]
     duration_ms: Option<u64>,
+    backend: Option<String>,
     #[serde(default, deserialize_with = "deserialize_boolish_opt")]
     debug: Option<bool>,
 }
@@ -141,6 +142,13 @@ struct ConfigUpdatePayload {
 enum LyricsError {
     Musixmatch(MxmError),
     Deezer(DeezerError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendMode {
+    Auto,
+    Musicxmatch,
+    Deezer,
 }
 
 #[derive(Debug, Serialize)]
@@ -407,9 +415,10 @@ async fn get_lyrics(
     let artist = query.artist.unwrap_or_default().trim().to_string();
     let spotify_id = query.spotify_id.unwrap_or_default().trim().to_string();
     let duration_secs = query.duration_ms.map(|value| value as f32 / 1000.0);
+    let backend = parse_backend_mode(query.backend.as_deref());
     let include_debug = query.debug.unwrap_or(false);
     state.logger.log(&format!(
-        "GET /lyrics title={title:?} artist={artist:?} spotify_id={spotify_id:?}"
+        "GET /lyrics title={title:?} artist={artist:?} spotify_id={spotify_id:?} backend={backend:?}"
     ));
 
     if spotify_id.is_empty() && (title.is_empty() || artist.is_empty()) {
@@ -425,13 +434,23 @@ async fn get_lyrics(
             .into_response();
     }
 
-    let cache_key = build_cache_key(&title, &artist, &spotify_id);
+    let cache_key = build_cache_key(&title, &artist, &spotify_id, backend);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
         state.logger.log(&format!("cache hit for key={cache_key}"));
         return json_response(StatusCode::OK, cached);
     }
 
-    match fetch_payload(&state, &title, &artist, &spotify_id, duration_secs, include_debug).await {
+    match fetch_payload(
+        &state,
+        &title,
+        &artist,
+        &spotify_id,
+        duration_secs,
+        backend,
+        include_debug,
+    )
+    .await
+    {
         Ok(mut payload) => {
             state.logger.log(&format!(
                 "lyrics resolved provider={} track_id={:?} track_name={:?} has_lrc={} has_text={}",
@@ -567,6 +586,19 @@ fn parse_version(value: &str) -> Vec<u32> {
         .collect()
 }
 
+fn parse_backend_mode(value: Option<&str>) -> BackendMode {
+    match value
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "musicxmatch" | "musixmatch" | "mxm" => BackendMode::Musicxmatch,
+        "deezer" => BackendMode::Deezer,
+        _ => BackendMode::Auto,
+    }
+}
+
 fn current_platform() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -697,6 +729,7 @@ fn update_all_command_lines() -> Vec<String> {
         vec![
             "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
             "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"".to_string(),
+            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"".to_string(),
             "spicetify apply".to_string(),
         ]
     }
@@ -705,6 +738,7 @@ fn update_all_command_lines() -> Vec<String> {
         vec![
             "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
             "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js".to_string(),
+            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js".to_string(),
             "spicetify apply".to_string(),
         ]
     }
@@ -714,7 +748,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let addon_steps = if include_addon {
-            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; spicetify apply"
+            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"; spicetify apply"
         } else {
             ""
         };
@@ -737,7 +771,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
             let _ = create_dir_all(parent);
         }
         let addon_steps = if include_addon {
-            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; spicetify apply"
+            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js; spicetify apply"
         } else {
             ""
         };
@@ -785,11 +819,16 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
     );
 }
 
-fn build_cache_key(title: &str, artist: &str, spotify_id: &str) -> String {
+fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: BackendMode) -> String {
+    let prefix = match backend {
+        BackendMode::Auto => "auto",
+        BackendMode::Musicxmatch => "musicxmatch",
+        BackendMode::Deezer => "deezer",
+    };
     if !spotify_id.is_empty() {
-        return format!("spotify:{spotify_id}");
+        return format!("{prefix}:spotify:{spotify_id}");
     }
-    format!("{}::{}", normalize(title), normalize(artist))
+    format!("{prefix}:{}::{}", normalize(title), normalize(artist))
 }
 
 async fn fetch_payload(
@@ -798,37 +837,65 @@ async fn fetch_payload(
     artist: &str,
     spotify_id: &str,
     duration_secs: Option<f32>,
+    backend: BackendMode,
     include_debug: bool,
 ) -> Result<LyricsPayload, LyricsError> {
-    match fetch_musixmatch_payload(
-        &state.mxm,
-        title,
-        artist,
-        spotify_id,
-        duration_secs,
-        include_debug,
-    )
-    .await
-    {
-        Ok(payload) => return Ok(payload),
-        Err(error) => {
-            state
-                .logger
-                .log(&format!("musixmatch lookup failed, trying Deezer fallback: {error}"));
-            if let Some(arl) = current_deezer_arl(state).await {
-                return fetch_deezer_payload(
-                    &state.deezer,
-                    &arl,
-                    title,
-                    artist,
-                    duration_secs,
-                    include_debug,
-                )
+    match backend {
+        BackendMode::Musicxmatch => fetch_musixmatch_payload(
+            &state.mxm,
+            title,
+            artist,
+            spotify_id,
+            duration_secs,
+            include_debug,
+        )
+        .await
+        .map_err(LyricsError::Musixmatch),
+        BackendMode::Deezer => {
+            let arl = current_deezer_arl(state)
                 .await
-                .map_err(LyricsError::Deezer);
-            }
-            return Err(LyricsError::Musixmatch(error));
+                .ok_or(LyricsError::Deezer(DeezerError::ConfigMissing))?;
+            fetch_deezer_payload(
+                &state.deezer,
+                &arl,
+                title,
+                artist,
+                duration_secs,
+                include_debug,
+            )
+            .await
+            .map_err(LyricsError::Deezer)
         }
+        BackendMode::Auto => match fetch_musixmatch_payload(
+            &state.mxm,
+            title,
+            artist,
+            spotify_id,
+            duration_secs,
+            include_debug,
+        )
+        .await
+        {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                state
+                    .logger
+                    .log(&format!("musixmatch lookup failed, trying Deezer fallback: {error}"));
+                if let Some(arl) = current_deezer_arl(state).await {
+                    return fetch_deezer_payload(
+                        &state.deezer,
+                        &arl,
+                        title,
+                        artist,
+                        duration_secs,
+                        include_debug,
+                    )
+                    .await
+                    .map_err(LyricsError::Deezer);
+                }
+                Err(LyricsError::Musixmatch(error))
+            }
+        },
     }
 }
 
@@ -1572,6 +1639,25 @@ mod tests {
         assert!(compare_versions("0.3.2", "0.3.1") > 0);
         assert!(compare_versions("0.3.1", "0.3.2") < 0);
         assert_eq!(compare_versions("0.3.1", "0.3.1"), 0);
+    }
+
+    #[test]
+    fn parse_backend_mode_handles_expected_values() {
+        assert_eq!(parse_backend_mode(None), BackendMode::Auto);
+        assert_eq!(parse_backend_mode(Some("auto")), BackendMode::Auto);
+        assert_eq!(parse_backend_mode(Some("musicxmatch")), BackendMode::Musicxmatch);
+        assert_eq!(parse_backend_mode(Some("musixmatch")), BackendMode::Musicxmatch);
+        assert_eq!(parse_backend_mode(Some("deezer")), BackendMode::Deezer);
+    }
+
+    #[test]
+    fn cache_keys_include_backend_mode() {
+        let auto = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Auto);
+        let mxm = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Musicxmatch);
+        let deezer = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Deezer);
+        assert_ne!(auto, mxm);
+        assert_ne!(mxm, deezer);
+        assert_ne!(auto, deezer);
     }
 
     #[test]

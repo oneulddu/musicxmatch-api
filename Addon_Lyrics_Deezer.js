@@ -1,7 +1,7 @@
 /**
  * @addon-type  lyrics
- * @id          musicxmatch-provider
- * @name        MusicXMatch Provider
+ * @id          deezer-provider
+ * @name        Deezer Provider
  * @version     0.5.0
  * @author      oneulddu
  */
@@ -9,18 +9,18 @@
 (() => {
     'use strict';
 
-    const ADDON_ID = 'musicxmatch-provider';
-    const BACKEND = 'musicxmatch';
+    const ADDON_ID = 'deezer-provider';
+    const BACKEND = 'deezer';
     const DEFAULT_SERVER_URL = 'http://127.0.0.1:8092';
     const DEFAULT_TIMEOUT_SEC = 15;
 
     const ADDON_INFO = {
         id: ADDON_ID,
-        name: 'MusicXMatch Provider',
+        name: 'Deezer Provider',
         author: 'oneulddu',
         version: '0.5.0',
         description: {
-            en: 'Fetches synced or plain lyrics from MusicXMatch through the local bridge server.',
+            en: 'Fetches synced or plain lyrics from Deezer through the local bridge server.',
         },
         supports: {
             karaoke: false,
@@ -196,17 +196,66 @@
         return versionState;
     }
 
+    async function fetchServerConfig(serverUrl) {
+        const configState = {
+            deezerArlConfigured: false,
+            deezerArlPreview: null,
+            error: null,
+        };
+
+        try {
+            const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/config', 5000);
+            if (response.ok) {
+                const payload = await response.json();
+                configState.deezerArlConfigured = !!payload.deezerArlConfigured;
+                configState.deezerArlPreview = payload.deezerArlPreview || null;
+            } else {
+                configState.error = `HTTP ${response.status}`;
+            }
+        } catch (error) {
+            configState.error = error.message;
+        }
+
+        return configState;
+    }
+
+    async function saveServerConfig(serverUrl, payload) {
+        const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/config', 10000, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            let detail = `HTTP ${response.status}`;
+            try {
+                const body = await response.json();
+                detail = body.detail || detail;
+            } catch {
+                // Ignore parse errors and keep generic status text.
+            }
+            throw new Error(detail);
+        }
+
+        return response.json();
+    }
+
     function getSettingsUI() {
         const React = Spicetify.React;
         const { useEffect, useState } = React;
 
-        return function MusicXMatchSettings() {
+        return function DeezerSettings() {
             const [serverUrl, setServerUrl] = useState(() => getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL));
             const [timeoutSec, setTimeoutSec] = useState(() => getSetting(SETTING.TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC));
             const [status, setStatus] = useState(null);
             const [versionStatus, setVersionStatus] = useState(null);
             const [updateStatus, setUpdateStatus] = useState(null);
             const [updateAllStatus, setUpdateAllStatus] = useState(null);
+            const [deezerArl, setDeezerArl] = useState('');
+            const [deezerConfig, setDeezerConfig] = useState(null);
+            const [deezerStatus, setDeezerStatus] = useState(null);
 
             const saveUrl = (value) => {
                 setServerUrl(value);
@@ -256,12 +305,36 @@
                 }
             };
 
+            const saveDeezerArl = async (value) => {
+                setDeezerStatus('saving');
+                try {
+                    const payload = await saveServerConfig(serverUrl || DEFAULT_SERVER_URL, {
+                        deezerArl: value.trim() || '',
+                    });
+                    setDeezerConfig({
+                        deezerArlConfigured: !!payload.deezerArlConfigured,
+                        deezerArlPreview: payload.deezerArlPreview || null,
+                        error: null,
+                    });
+                    setDeezerArl('');
+                    setDeezerStatus(value.trim() ? 'saved' : 'cleared');
+                } catch (error) {
+                    setDeezerStatus(`failed:${error.message}`);
+                }
+            };
+
             useEffect(() => {
                 let cancelled = false;
 
                 fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((result) => {
                     if (!cancelled) {
                         setVersionStatus(result);
+                    }
+                });
+
+                fetchServerConfig(serverUrl || DEFAULT_SERVER_URL).then((result) => {
+                    if (!cancelled) {
+                        setDeezerConfig(result);
                     }
                 });
 
@@ -308,7 +381,7 @@
             const updateNeeded = !!(versionStatus && (versionStatus.addonOutdated || versionStatus.serverOutdated));
 
             return React.createElement('div', { style: box },
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'MusicXMatch server'),
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Lyrics bridge server'),
                 React.createElement('input', {
                     type: 'text',
                     value: serverUrl,
@@ -335,6 +408,42 @@
                     }, status === 'testing' ? 'Testing...' : 'Test connection'),
                     status === 'ok' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Connected'),
                     status === 'fail' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed')
+                ),
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 18, marginBottom: 8 } }, 'Deezer cookie'),
+                React.createElement('input', {
+                    type: 'password',
+                    value: deezerArl,
+                    style: input,
+                    placeholder: 'Paste Deezer arl cookie',
+                    onChange: (event) => {
+                        setDeezerArl(event.target.value);
+                        setDeezerStatus(null);
+                    },
+                }),
+                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
+                    'Required for Deezer provider. Paste your Deezer arl cookie so the local server can authenticate.'
+                ),
+                React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
+                    React.createElement('button', {
+                        style: button,
+                        onClick: () => saveDeezerArl(deezerArl),
+                        disabled: deezerStatus === 'saving',
+                    }, deezerStatus === 'saving' ? 'Saving...' : 'Save Deezer cookie'),
+                    React.createElement('button', {
+                        style: { ...button, background: 'rgba(255,255,255,0.16)', color: '#fff' },
+                        onClick: () => saveDeezerArl(''),
+                        disabled: deezerStatus === 'saving',
+                    }, 'Clear'),
+                    deezerConfig?.deezerArlConfigured && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Configured'),
+                    deezerStatus === 'saved' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Saved'),
+                    deezerStatus === 'cleared' && React.createElement('span', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700 } }, 'Cleared'),
+                    deezerStatus?.startsWith('failed:') && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Save failed')
+                ),
+                deezerConfig?.deezerArlPreview && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
+                    `Saved cookie: ${deezerConfig.deezerArlPreview}`
+                ),
+                deezerConfig?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 8 } },
+                    `Deezer config check failed: ${deezerConfig.error}`
                 ),
                 React.createElement('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 14 } },
                     `Addon: ${ADDON_INFO.version}`,
@@ -452,7 +561,7 @@
         return result;
     }
 
-    const MusicXMatchAddon = {
+    const DeezerAddon = {
         ...ADDON_INFO,
         async init() {
             window.__ivLyricsDebugLog?.(`[${ADDON_ID}] initialized`);
@@ -463,7 +572,7 @@
 
     const register = () => {
         if (window.LyricsAddonManager) {
-            window.LyricsAddonManager.register(MusicXMatchAddon);
+            window.LyricsAddonManager.register(DeezerAddon);
             return;
         }
         setTimeout(register, 100);

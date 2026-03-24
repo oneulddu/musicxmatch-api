@@ -1,6 +1,6 @@
-# ivLyrics MusicXMatch Provider
+# ivLyrics Lyrics Providers
 
-MusicXMatch 가사 제공자 애드온 for ivLyrics
+MusicXMatch / Deezer 가사 제공자 애드온 for ivLyrics
 
 ## 특징
 
@@ -8,7 +8,7 @@ MusicXMatch 가사 제공자 애드온 for ivLyrics
 - ✅ 일반 가사 지원
 - ✅ Spotify Track ID 우선 매칭
 - ✅ 자동 트랙 매칭 (Android API 기반)
-- ✅ 선택적 Deezer fallback 지원
+- ✅ MusicXMatch / Deezer provider 분리 지원
 - ✅ 캐싱 (30분)
 - ✅ Rust 단일 바이너리 서버
 
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 ```
 
 이 명령은 Rust 기반 로컬 서버를 설치하고, `http://127.0.0.1:8092`로 자동 시작되도록 설정합니다.
-또한 `Addon_Lyrics_MusicXMatch.js`를 Spicetify Extensions 폴더에 배치하고, 기존 extension 목록을 유지한 채 자동으로 등록한 뒤 `spicetify apply`까지 실행합니다.
+또한 `Addon_Lyrics_MusicXMatch.js`와 `Addon_Lyrics_Deezer.js`를 Spicetify Extensions 폴더에 배치하고, 기존 extension 목록을 유지한 채 자동으로 등록한 뒤 `spicetify apply`까지 실행합니다.
 설치 스크립트는 마지막 단계에서 `/health` 응답과 `Access-Control-Allow-Origin: *` 헤더까지 검사합니다.
 Windows에서는 작업 스케줄러가 직접 exe를 실행하지 않고 `run-server.ps1` 래퍼를 통해 로그를 남기면서 서버를 실행합니다.
 
@@ -39,14 +39,16 @@ Windows에서는 작업 스케줄러가 직접 exe를 실행하지 않고 `run-s
 
 기본 설치 스크립트를 썼다면 이 단계는 자동으로 끝납니다. 아래 내용은 수동으로 다시 등록하거나, 애드온만 따로 갱신하고 싶을 때 사용하면 됩니다.
 
-`Addon_Lyrics_MusicXMatch.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
+`Addon_Lyrics_MusicXMatch.js`와 `Addon_Lyrics_Deezer.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
 
 ### Windows
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\spicetify\Extensions" | Out-Null
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Deezer.js"
 spicetify config extensions Addon_Lyrics_MusicXMatch.js
+spicetify config extensions Addon_Lyrics_Deezer.js
 spicetify apply
 ```
 
@@ -56,7 +58,10 @@ spicetify apply
 mkdir -p ~/.config/spicetify/Extensions
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js \
   -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js \
+  -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
 spicetify config extensions Addon_Lyrics_MusicXMatch.js
+spicetify config extensions Addon_Lyrics_Deezer.js
 spicetify apply
 ```
 
@@ -64,7 +69,9 @@ spicetify apply
 
 ```text
 Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
+Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_Deezer.js
 ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
 ```
 
 ivLyrics 앱 폴더 위치:
@@ -74,24 +81,24 @@ Windows: %LocalAppData%\spicetify\CustomApps\ivLyrics
 ~/.config/spicetify/CustomApps/ivLyrics
 ```
 
-이미 다른 extension을 사용 중이면 `spicetify config extensions` 값을 덮어쓰지 않도록 기존 목록에 `Addon_Lyrics_MusicXMatch.js`를 추가하세요.
+이미 다른 extension을 사용 중이면 `spicetify config extensions` 값을 덮어쓰지 않도록 기존 목록에 두 파일을 각각 추가하세요.
 
 ## 사용법
 
 1. 서버가 자동으로 시작됩니다 (`http://127.0.0.1:8092`)
 2. ivLyrics가 `~/.config/spicetify/CustomApps/ivLyrics`에 설치되어 있어야 합니다
-3. Spicetify extension으로 `Addon_Lyrics_MusicXMatch.js`가 등록되어 있어야 합니다
-4. ivLyrics 설정에서 MusicXMatch 애드온 활성화
+3. Spicetify extension으로 `Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`가 등록되어 있어야 합니다
+4. ivLyrics 설정에서 원하는 provider를 각각 활성화
 5. 서버 URL 확인: `http://127.0.0.1:8092`
 
 ## Deezer fallback 설정
 
-Musixmatch에서 못 찾는 곡을 Deezer로 한 번 더 시도할 수 있습니다.
+Deezer provider를 사용하려면 인증용 `arl` 쿠키가 필요합니다.
 
 설정 방법:
 1. Deezer 웹 플레이어에 로그인
 2. 브라우저 개발자 도구의 쿠키에서 `arl` 값을 복사
-3. ivLyrics의 `MusicXMatch Provider` 설정 화면에서 `Deezer fallback` 입력칸에 붙여넣고 저장
+3. ivLyrics의 `Deezer Provider` 설정 화면에서 `Deezer cookie` 입력칸에 붙여넣고 저장
 
 저장 위치:
 
@@ -160,7 +167,7 @@ systemctl --user restart ivlyrics-musicxmatch
 
 설정 화면에는 두 가지 버튼이 있습니다.
 - `Update now`: 서버 설치 스크립트만 다시 실행
-- `Update all`: 서버 설치 스크립트 실행 + 애드온 파일 갱신 + `spicetify apply`
+- `Update all`: 서버 설치 스크립트 실행 + 두 애드온 파일 갱신 + `spicetify apply`
 
 `Update all`은 Spotify UI가 다시 적용되므로 실행 시 잠깐 재로딩될 수 있습니다.
 
@@ -180,7 +187,9 @@ iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/unins
 
 ```powershell
 Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Deezer.js" -Force -ErrorAction SilentlyContinue
 spicetify config extensions Addon_Lyrics_MusicXMatch.js-
+spicetify config extensions Addon_Lyrics_Deezer.js-
 spicetify apply
 ```
 
@@ -190,6 +199,7 @@ spicetify apply
 %USERPROFILE%\.ivlyrics-musicxmatch
 %USERPROFILE%\.cargo\bin\ivlyrics-musicxmatch-server.exe
 %APPDATA%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
+%APPDATA%\spicetify\Extensions\Addon_Lyrics_Deezer.js
 ```
 
 ### macOS / Linux
@@ -204,7 +214,9 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/unins
 
 ```bash
 rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
 spicetify config extensions Addon_Lyrics_MusicXMatch.js-
+spicetify config extensions Addon_Lyrics_Deezer.js-
 spicetify apply
 ```
 
@@ -214,6 +226,7 @@ spicetify apply
 ~/.ivlyrics-musicxmatch
 ~/.cargo/bin/ivlyrics-musicxmatch-server
 ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
 ```
 
 ## CORS / Health 확인
