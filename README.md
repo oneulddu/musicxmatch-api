@@ -31,10 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 ```
 
 이 명령은 Rust 기반 로컬 서버를 설치하고, `http://127.0.0.1:8092`로 자동 시작되도록 설정합니다.
+또한 `Addon_Lyrics_MusicXMatch.js`를 Spicetify Extensions 폴더에 배치하고, 기존 extension 목록을 유지한 채 자동으로 등록한 뒤 `spicetify apply`까지 실행합니다.
 설치 스크립트는 마지막 단계에서 `/health` 응답과 `Access-Control-Allow-Origin: *` 헤더까지 검사합니다.
 Windows에서는 작업 스케줄러가 직접 exe를 실행하지 않고 `run-server.ps1` 래퍼를 통해 로그를 남기면서 서버를 실행합니다.
 
 ## ivLyrics 애드온 추가
+
+기본 설치 스크립트를 썼다면 이 단계는 자동으로 끝납니다. 아래 내용은 수동으로 다시 등록하거나, 애드온만 따로 갱신하고 싶을 때 사용하면 됩니다.
 
 `Addon_Lyrics_MusicXMatch.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
 

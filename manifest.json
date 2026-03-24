@@ -4,7 +4,7 @@
       "name": "MusicXMatch Provider",
       "type": "lyrics",
       "author": "oneulddu",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "updated": "2026-03-25",
       "description": "Fetches synced or plain lyrics from a local MusicXMatch bridge server.",
       "downloadUrl": "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js",
