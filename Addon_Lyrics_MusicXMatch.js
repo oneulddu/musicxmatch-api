@@ -12,12 +12,13 @@
     const ADDON_ID = 'musicxmatch-provider';
     const DEFAULT_SERVER_URL = 'http://127.0.0.1:8092';
     const DEFAULT_TIMEOUT_SEC = 15;
+    const VERSION_INFO_URL = 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json';
 
     const ADDON_INFO = {
         id: ADDON_ID,
         name: 'MusicXMatch Provider',
         author: 'oneulddu',
-        version: '0.2.8',
+        version: '0.2.9',
         description: {
             en: 'Fetches synced or plain lyrics from a local MusicXMatch bridge server.',
         },
@@ -140,14 +141,101 @@
         return lines.length ? lines : null;
     }
 
+    function parseVersion(value) {
+        return String(value || '0.0.0')
+            .split('.')
+            .map((part) => parseInt(part, 10) || 0);
+    }
+
+    function compareVersions(left, right) {
+        const a = parseVersion(left);
+        const b = parseVersion(right);
+        const length = Math.max(a.length, b.length);
+        for (let index = 0; index < length; index += 1) {
+            const delta = (a[index] || 0) - (b[index] || 0);
+            if (delta !== 0) {
+                return delta;
+            }
+        }
+        return 0;
+    }
+
+    function isWindowsPlatform() {
+        const value = `${navigator.platform || ''} ${navigator.userAgent || ''}`.toLowerCase();
+        return value.includes('win');
+    }
+
+    function getUpdateCommandLines() {
+        if (isWindowsPlatform()) {
+            return [
+                'iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex',
+                'Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js" -OutFile "$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js"',
+                'spicetify apply',
+            ];
+        }
+
+        return [
+            'curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash',
+            'curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js',
+            'spicetify apply',
+        ];
+    }
+
+    async function fetchVersionStatus(serverUrl) {
+        const versionState = {
+            latestAddonVersion: null,
+            latestServerVersion: null,
+            currentAddonVersion: ADDON_INFO.version,
+            currentServerVersion: null,
+            addonOutdated: false,
+            serverOutdated: false,
+            error: null,
+        };
+
+        try {
+            const latestResponse = await fetch(VERSION_INFO_URL, {
+                signal: AbortSignal.timeout(5000),
+            });
+            if (!latestResponse.ok) {
+                throw new Error(`Latest version lookup failed (${latestResponse.status})`);
+            }
+            const latestPayload = await latestResponse.json();
+            versionState.latestAddonVersion = latestPayload.addon || null;
+            versionState.latestServerVersion = latestPayload.server || null;
+        } catch (error) {
+            versionState.error = error.message;
+            return versionState;
+        }
+
+        try {
+            const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/health', 5000);
+            if (response.ok) {
+                const payload = await response.json();
+                versionState.currentServerVersion = payload.version || null;
+            }
+        } catch {
+            // Server health is optional for version checks; keep latest version data.
+        }
+
+        if (versionState.latestAddonVersion) {
+            versionState.addonOutdated = compareVersions(versionState.latestAddonVersion, versionState.currentAddonVersion) > 0;
+        }
+        if (versionState.latestServerVersion && versionState.currentServerVersion) {
+            versionState.serverOutdated = compareVersions(versionState.latestServerVersion, versionState.currentServerVersion) > 0;
+        }
+
+        return versionState;
+    }
+
     function getSettingsUI() {
         const React = Spicetify.React;
-        const { useState } = React;
+        const { useEffect, useState } = React;
 
         return function MusicXMatchSettings() {
             const [serverUrl, setServerUrl] = useState(() => getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL));
             const [timeoutSec, setTimeoutSec] = useState(() => getSetting(SETTING.TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC));
             const [status, setStatus] = useState(null);
+            const [versionStatus, setVersionStatus] = useState(null);
 
             const saveUrl = (value) => {
                 setServerUrl(value);
@@ -173,6 +261,20 @@
                 }
             };
 
+            useEffect(() => {
+                let cancelled = false;
+
+                fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((result) => {
+                    if (!cancelled) {
+                        setVersionStatus(result);
+                    }
+                });
+
+                return () => {
+                    cancelled = true;
+                };
+            }, [serverUrl]);
+
             const box = {
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.08)',
@@ -197,6 +299,18 @@
                 color: '#000',
                 fontWeight: 700,
             };
+            const commandBox = {
+                marginTop: 14,
+                padding: '10px 12px',
+                borderRadius: 8,
+                background: 'rgba(0,0,0,0.25)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                fontSize: 12,
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+            };
+            const updateNeeded = !!(versionStatus && (versionStatus.addonOutdated || versionStatus.serverOutdated));
 
             return React.createElement('div', { style: box },
                 React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'MusicXMatch server'),
@@ -226,6 +340,22 @@
                     }, status === 'testing' ? 'Testing...' : 'Test connection'),
                     status === 'ok' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Connected'),
                     status === 'fail' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed')
+                ),
+                React.createElement('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 14 } },
+                    `Addon: ${ADDON_INFO.version}`,
+                    versionStatus?.currentServerVersion ? ` | Server: ${versionStatus.currentServerVersion}` : ''
+                ),
+                versionStatus?.latestAddonVersion && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 6 } },
+                    `Latest addon: ${versionStatus.latestAddonVersion}`,
+                    versionStatus.latestServerVersion ? ` | Latest server: ${versionStatus.latestServerVersion}` : ''
+                ),
+                updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
+                    React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'Run the commands below to update the server and addon:'),
+                    React.createElement('div', { style: commandBox }, getUpdateCommandLines().join('\n'))
+                ),
+                versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },
+                    `Version check failed: ${versionStatus.error}`
                 )
             );
         };
