@@ -128,6 +128,58 @@ Linux(systemd user)에서는:
 systemctl --user restart ivlyrics-musicxmatch
 ```
 
+## 제거
+
+서버 제거와 애드온 제거는 별개입니다. 둘 다 지우려면 아래 순서로 진행하세요.
+
+### Windows
+
+서버 제거:
+
+```powershell
+iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.ps1" | iex
+```
+
+애드온 제거:
+
+```powershell
+Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js" -Force -ErrorAction SilentlyContinue
+spicetify config extensions Addon_Lyrics_MusicXMatch.js-
+spicetify apply
+```
+
+제거되는 주요 위치:
+
+```text
+%USERPROFILE%\.ivlyrics-musicxmatch
+%USERPROFILE%\.cargo\bin\ivlyrics-musicxmatch-server.exe
+%APPDATA%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
+```
+
+### macOS / Linux
+
+서버 제거:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.sh | bash
+```
+
+애드온 제거:
+
+```bash
+rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+spicetify config extensions Addon_Lyrics_MusicXMatch.js-
+spicetify apply
+```
+
+제거되는 주요 위치:
+
+```text
+~/.ivlyrics-musicxmatch
+~/.cargo/bin/ivlyrics-musicxmatch-server
+~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
+```
+
 ## CORS / Health 확인
 
 Spotify 웹뷰에서 로컬 서버를 읽으려면 CORS 헤더가 있어야 합니다. 아래 응답에 `access-control-allow-origin: *`가 보여야 정상입니다.
