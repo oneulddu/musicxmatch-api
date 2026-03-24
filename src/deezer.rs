@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -186,6 +186,8 @@ impl DeezerClient {
             .post(AUTH_URL)
             .query(&[("jo", "p"), ("rto", "c"), ("i", "c")])
             .header(COOKIE, format!("arl={arl}"))
+            .header(CONTENT_LENGTH, "0")
+            .body("")
             .send()
             .await
             .map_err(|error| DeezerError::Auth(error.to_string()))?;
