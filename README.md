@@ -1,134 +1,50 @@
-# MusicXMatch API
+# ivLyrics MusicXMatch Provider (Node.js)
 
-Musixmatch is the world's largest catalog of song lyrics and translations. The service is used by millions of people around the world to find lyrics for songs playing around them, to translate lyrics, and to get the facts behind the songs.
+MusicXMatch 가사 제공자 애드온 for ivLyrics
 
-## ivLyrics Addon Mode
+## 특징
 
-This repository can now also be used as an `ivLyrics` lyrics provider, similar to the `ivLyrics-Youtube-Caption-Provider` layout.
+- ✅ 동기화 가사 (richsync) 지원
+- ✅ 일반 가사 지원
+- ✅ 자동 트랙 매칭 (스코어링 시스템)
+- ✅ 캐싱 (30분)
+- ✅ 자동 시작 설정
 
-Included files:
+## 설치
 
-- `Addon_Lyrics_MusicXMatch.js`
-- `manifest.json`
-- `version.json`
-- `server.py`
+### Windows
 
-Quick start:
+PowerShell에서 실행:
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e .
-musicxmatch-addon-server --host 127.0.0.1 --port 8092
+```powershell
+iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.ps1" | iex
 ```
 
-Then point the addon to:
+### macOS / Linux
 
-```text
-http://localhost:8092
-```
-
-Server endpoints:
-
-- `GET /health`
-- `GET /lyrics?title=Skyfall&artist=Adele`
-
-The bridge prefers MusicXMatch richsync data when available and falls back to plain lyrics text otherwise.
-
-Install script examples:
+터미널에서 실행:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.sh | bash
 ```
 
-```powershell
-iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/install.ps1" -OutFile "$env:TEMP\musicxmatch-provider.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\musicxmatch-provider.ps1"
-```
+## 사용법
 
-Uninstall script examples:
+1. 서버가 자동으로 시작됩니다 (http://localhost:8092)
+2. ivLyrics 설정에서 MusicXMatch 애드온 활성화
+3. 서버 URL 확인: `http://localhost:8092`
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/uninstall.sh | bash
-```
-
-```powershell
-iwr -useb "https://raw.githubusercontent.com/Strvm/musicxmatch-api/main/uninstall.ps1" -OutFile "$env:TEMP\musicxmatch-provider-uninstall.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\musicxmatch-provider-uninstall.ps1"
-```
-
-# What is this?
-
-This is a Python wrapper for the [Musixmatch API](https://developer.musixmatch.com/). It uses the community API key to make requests to the API. These requests have the the same access as a **[Plus](https://developer.musixmatch.com/plans)** plan but for **free**.
-
-# What can I access?
-
-You can basically query for any lyrics and translation from their API, a more detailed list can be viewed here: [Musixmatch API Documentation](https://developer.musixmatch.com/documentation).
-
-# How do I use it?
-
-First, you need to install the package:
+## 수동 설치
 
 ```bash
-pip install musicxmatch_api
+npm install
+node server.js
 ```
 
-# Examples
+---
 
-Search for artists
-```python
-    # If you need to make a high volume of requests, consider using proxies
-    from musicxmatch_api import MusixMatchAPI
-    api = MusixMatchAPI(proxies=proxies)
-    search = api.search_artist("adele")
-```
+## Python API (Legacy)
 
-Search for songs
-```python
-    # If you need to make a high volume of requests, consider using proxies
-    import json
-    from musicxmatch_api import MusixMatchAPI
-    api = MusixMatchAPI()
-    search = api.search_tracks("skyfall")
-    print(json.dumps(search, indent=4))
-```
+Python 버전은 `legacy/` 폴더에 있습니다.
 
-Search for a specific song to get its lyrics
-```python
-    # If you need to make a high volume of requests, consider using proxies
-    from musicxmatch_api import MusixMatchAPI
-    track_id = 103149239 # Skyfall by Adele
-    api = MusixMatchAPI(proxies=proxies)
-    search = api.get_track_lyrics(track_id=track_id)
-    # The lyrics are in the "lyrics_body" key
-    lyrics = search["message"]["body"]["lyrics"]["lyrics_body"]
-```
 
-# License
-```
-Strvm/musicxmatch-api: a reverse engineered API wrapper for MusicXMatch  
-Copyright (c) 2025 Strvm
-
-Permission is hereby granted, free of charge, to any person obtaining a copy  
-of this software and associated documentation files (the "Software"), to deal  
-in the Software without restriction, including without limitation the rights  
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell  
-copies of the Software, and to permit persons to whom the Software is  
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all  
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,  
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE  
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER  
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  
-SOFTWARE.
-```
-
-# MusicXMatch Copyright
-For more information tied to the copyright of the Musixmatch API, please refer to the [Musixmatch Copyright](https://about.musixmatch.com/copyright).
-
-# Disclaimer
-
-The content provided herein is intended strictly for educational purposes. Any misuse or abuse of this information that contradicts this purpose, including but not limited to the unauthorized distribution, reproduction, or alteration of content, or the use of information for illicit activities, is strictly prohibited and may constitute a violation of applicable laws and regulations. This could lead to serious consequences including legal action. Educational resources are to be used responsibly, ethically, and with integrity. We reserve the right to restrict access to these resources for anyone found violating these terms.
