@@ -1,6 +1,6 @@
 [package]
 name = "ivlyrics-musicxmatch-server"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "MIT"
 description = "Local lyrics bridge server for ivLyrics powered by musixmatch-inofficial"
@@ -17,3 +17,4 @@ musixmatch-inofficial = "0.4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }

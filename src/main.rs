@@ -15,6 +15,7 @@ use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_PORT: u16 = 8092;
@@ -95,6 +96,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/lyrics", get(get_lyrics))
         .route("/cache", delete(clear_cache))
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
