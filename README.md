@@ -1,423 +1,310 @@
 # ivLyrics Lyrics Providers
 
-MusicXMatch / Deezer / Bugs / Genie 가사 제공자 애드온 for ivLyrics
+Spotify용 ivLyrics 확장에 MusicXMatch, Deezer, Bugs, Genie 가사를 제공하는 로컬 서버
 
-## 특징
+## 주요 기능
 
-- ✅ 동기화 가사 (richsync) 지원
-- ✅ 일반 가사 지원
-- ✅ Spotify Track ID 우선 매칭
-- ✅ 자동 트랙 매칭 (Android API 기반)
-- ✅ MusicXMatch / Deezer / Bugs / Genie provider 분리 지원
-- ✅ 캐싱 (30분)
-- ✅ Rust 단일 바이너리 서버
+- 🎵 **4개 Provider 지원**: MusicXMatch, Deezer, Bugs, Genie
+- ⚡ **동기화 가사**: LRC 형식 타임스탬프 가사 지원
+- 🎯 **스마트 매칭**: Spotify Track ID 우선, 자동 fallback
+- 💾 **캐싱**: 30분 자동 캐시로 빠른 응답
+- 🦀 **Rust 기반**: 단일 바이너리, 낮은 메모리 사용
+- 🔄 **자동 시작**: OS 부팅 시 백그라운드 실행
 
-## 개발 메모
+---
 
-`Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`, `Addon_Lyrics_Bugs.js`, `Addon_Lyrics_Genie.js`, `manifest.json`은 수동 편집 대상이 아닙니다.
-소스는 `scripts/addon_definitions.json`과 `scripts/generate_addons.js`에 두고, 변경 후 아래 명령으로 다시 생성합니다.
+## 빠른 시작
 
-```bash
-node scripts/generate_addons.js
-```
+### 자동 설치 (권장)
 
-버전을 올릴 때는 아래 스크립트를 사용하면 정의 파일 갱신과 addon/manifest 재생성이 같이 처리됩니다.
-
-```bash
-./scripts/bump_version.sh 0.7.0
-```
-
-## 설치
-
-### Windows
-
-PowerShell에서 실행:
-
+**Windows (PowerShell)**
 ```powershell
 iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex
 ```
 
-### macOS / Linux
-
-터미널에서 실행:
-
+**macOS / Linux**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
-이 명령은 Rust 기반 로컬 서버를 설치하고, `http://127.0.0.1:8092`로 자동 시작되도록 설정합니다.
-또한 `Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`, `Addon_Lyrics_Bugs.js`, `Addon_Lyrics_Genie.js`를 Spicetify Extensions 폴더에 배치하고, 기존 extension 목록을 유지한 채 자동으로 등록한 뒤 `spicetify apply`까지 실행합니다.
-설치 스크립트는 마지막 단계에서 `/health` 응답과 `Access-Control-Allow-Origin: *` 헤더까지 검사합니다.
-Windows에서는 작업 스케줄러가 직접 exe를 실행하지 않고 `run-server.ps1` 래퍼를 통해 로그를 남기면서 서버를 실행합니다.
+설치 스크립트가 자동으로:
+1. 로컬 서버 설치 및 자동 시작 설정 (`http://127.0.0.1:8092`)
+2. Spicetify Extensions에 4개 애드온 파일 배치
+3. 기존 extension 목록 유지하며 자동 등록
+4. `spicetify apply` 실행
+5. 서버 health check 및 CORS 헤더 검증
 
-## ivLyrics 애드온 추가
+### 사용법
 
-기본 설치 스크립트를 썼다면 이 단계는 자동으로 끝납니다. 아래 내용은 수동으로 다시 등록하거나, 애드온만 따로 갱신하고 싶을 때 사용하면 됩니다.
+1. ivLyrics 설정에서 원하는 provider 활성화
+2. Spotify에서 음악 재생
+3. 가사가 자동으로 표시됨
 
-`Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`, `Addon_Lyrics_Bugs.js`, `Addon_Lyrics_Genie.js`는 ivLyrics 내부 파일이 아니라 Spicetify extension으로 등록해야 합니다.
+**Deezer 사용 시**: ivLyrics 설정에서 Deezer ARL 쿠키 입력 필요 (아래 참조)
 
-### Windows
+---
 
+## Provider 설정
+
+### MusicXMatch
+- 별도 설정 불필요
+- 자동으로 세션 토큰 관리
+
+### Deezer
+Deezer 가사를 사용하려면 ARL 쿠키 필요:
+
+1. [Deezer 웹 플레이어](https://www.deezer.com) 로그인
+2. 브라우저 개발자 도구 → Application/Storage → Cookies
+3. `arl` 값 복사
+4. ivLyrics 설정 → Deezer Provider → Deezer cookie에 붙여넣기
+
+**환경 변수로 설정** (선택사항):
+```bash
+export DEEZER_ARL=your_arl_cookie_value
+```
+
+### Bugs / Genie
+- 별도 설정 불필요
+- 로그인 없이 공개 API 사용
+
+---
+
+## 고급 설정
+
+### 환경 변수
+
+```bash
+# 서버 포트 (기본: 8092)
+PORT=8092
+
+# Provider별 타임아웃 (초)
+IVLYRICS_HTTP_TIMEOUT_SECS=10
+IVLYRICS_MUSIXMATCH_TIMEOUT_SECS=15
+IVLYRICS_DEEZER_TIMEOUT_SECS=10
+IVLYRICS_BUGS_TIMEOUT_SECS=10
+IVLYRICS_GENIE_TIMEOUT_SECS=10
+
+# Deezer ARL
+DEEZER_ARL=your_cookie
+
+# 로그 파일 위치
+IVLYRICS_MXM_LOG=/custom/path/server.log
+```
+
+### 수동 애드온 설치
+
+자동 설치 스크립트를 사용하지 않는 경우:
+
+**Windows**
 ```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\spicetify\Extensions" | Out-Null
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Deezer.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Bugs.js"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js" -OutFile "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Genie.js"
-spicetify config extensions Addon_Lyrics_MusicXMatch.js
-spicetify config extensions Addon_Lyrics_Deezer.js
-spicetify config extensions Addon_Lyrics_Bugs.js
-spicetify config extensions Addon_Lyrics_Genie.js
+$ext = "$env:APPDATA\spicetify\Extensions"
+New-Item -ItemType Directory -Force $ext | Out-Null
+$base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
+@("MusicXMatch", "Deezer", "Bugs", "Genie") | ForEach-Object {
+    Invoke-WebRequest "$base/Addon_Lyrics_$_.js" -OutFile "$ext\Addon_Lyrics_$_.js"
+    spicetify config extensions "Addon_Lyrics_$_.js"
+}
 spicetify apply
 ```
 
-### macOS / Linux
-
+**macOS / Linux**
 ```bash
 mkdir -p ~/.config/spicetify/Extensions
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js \
-  -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js \
-  -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js \
-  -o ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js \
-  -o ~/.config/spicetify/Extensions/Addon_Lyrics_Genie.js
-spicetify config extensions Addon_Lyrics_MusicXMatch.js
-spicetify config extensions Addon_Lyrics_Deezer.js
-spicetify config extensions Addon_Lyrics_Bugs.js
-spicetify config extensions Addon_Lyrics_Genie.js
+base="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
+for p in MusicXMatch Deezer Bugs Genie; do
+    curl -fsSL "$base/Addon_Lyrics_$p.js" -o ~/.config/spicetify/Extensions/Addon_Lyrics_$p.js
+    spicetify config extensions "Addon_Lyrics_$p.js"
+done
 spicetify apply
 ```
 
-애드온 파일 위치:
+---
 
-```text
-Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
-Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_Deezer.js
-Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_Bugs.js
-Windows: %AppData%\spicetify\Extensions\Addon_Lyrics_Genie.js
-~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Genie.js
+## 업데이트
+
+### ivLyrics 설정에서 (권장)
+- **Update now**: 서버만 업데이트
+- **Update all**: 서버 + 애드온 + spicetify apply
+
+### 수동 업데이트
+설치 스크립트 재실행:
+
+**Windows**
+```powershell
+iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex
 ```
 
-ivLyrics 앱 폴더 위치:
-
-```text
-Windows: %LocalAppData%\spicetify\CustomApps\ivLyrics
-~/.config/spicetify/CustomApps/ivLyrics
-```
-
-이미 다른 extension을 사용 중이면 `spicetify config extensions` 값을 덮어쓰지 않도록 기존 목록에 세 파일을 각각 추가하세요.
-
-## 사용법
-
-1. 서버가 자동으로 시작됩니다 (`http://127.0.0.1:8092`)
-2. ivLyrics가 `~/.config/spicetify/CustomApps/ivLyrics`에 설치되어 있어야 합니다
-3. Spicetify extension으로 `Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`, `Addon_Lyrics_Bugs.js`, `Addon_Lyrics_Genie.js`가 등록되어 있어야 합니다
-4. ivLyrics 설정에서 원하는 provider를 각각 활성화
-5. 서버 URL 확인: `http://127.0.0.1:8092`
-
-## Deezer fallback 설정
-
-Deezer provider를 사용하려면 인증용 `arl` 쿠키가 필요합니다.
-
-설정 방법:
-1. Deezer 웹 플레이어에 로그인
-2. 브라우저 개발자 도구의 쿠키에서 `arl` 값을 복사
-3. ivLyrics의 `Deezer Provider` 설정 화면에서 `Deezer cookie` 입력칸에 붙여넣고 저장
-
-저장 위치:
-
-```text
-Windows: %USERPROFILE%\.ivlyrics-musicxmatch\config.json
-macOS/Linux: ~/.ivlyrics-musicxmatch/config.json
-```
-
-원하면 환경 변수로도 줄 수 있습니다.
-
-```text
-DEEZER_ARL=<your_cookie_value>
-```
-
-환경 변수 `DEEZER_ARL`이 있으면 설정 파일보다 우선합니다.
-
-## Bugs provider 동작 방식
-
-Bugs provider는 별도 로그인 없이 아래 흐름으로 동작합니다.
-1. Spotify에서 받은 `title`, `artist`, `duration`으로 Bugs 모바일 검색 API에서 후보를 찾음
-2. 제목/아티스트/길이 점수로 가장 적절한 `track_id`를 고름
-3. `https://music.bugs.co.kr/player/lyrics/T/{track_id}` 에서 synced lyrics 조회
-4. synced가 없으면 `https://music.bugs.co.kr/player/lyrics/N/{track_id}` 에서 plain lyrics 조회
-
-즉 `track_id`를 미리 알고 있을 필요는 없습니다.
-
-## Genie provider 동작 방식
-
-Genie provider는 별도 로그인 없이 아래 흐름으로 동작합니다.
-1. Spotify에서 받은 `title`, `artist`로 Genie `searchMain` 검색 결과에서 후보를 찾음
-2. 제목/아티스트 유사도로 가장 적절한 `song_id` 후보를 고름
-3. `https://dn.genie.co.kr/app/purchase/get_msl.asp?path=a&songid={song_id}` 에서 synced lyrics(JSONP)를 조회
-4. JSONP payload를 LRC 형식으로 변환해 ivLyrics에 전달
-
-Genie는 현재 구조상 synced 중심 provider이고, 가사가 없는 곡은 다음 후보 또는 다른 provider로 넘어갑니다.
-
-## 수동 설치
-
-Rust가 설치되어 있다면 서버만 직접 실행할 수 있습니다:
-
+**macOS / Linux**
 ```bash
-cargo run
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
-서버 상태 확인:
+---
 
+## 제거
+
+**Windows**
+```powershell
+# 서버 제거
+iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.ps1" | iex
+
+# 애드온 제거
+@("MusicXMatch", "Deezer", "Bugs", "Genie") | ForEach-Object {
+    Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_$_.js" -Force -ErrorAction SilentlyContinue
+    spicetify config extensions "Addon_Lyrics_$_.js-"
+}
+spicetify apply
+```
+
+**macOS / Linux**
+```bash
+# 서버 제거
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.sh | bash
+
+# 애드온 제거
+for p in MusicXMatch Deezer Bugs Genie; do
+    rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_$p.js
+    spicetify config extensions "Addon_Lyrics_$p.js-"
+done
+spicetify apply
+```
+
+---
+
+## API 엔드포인트
+
+### GET /health
+서버 상태 확인
 ```bash
 curl http://127.0.0.1:8092/health
 ```
 
-## 업데이트
-
-최신 버전으로 올리려면 설치 스크립트를 다시 실행한 뒤 서버를 재시작하세요.
-
-### Windows
-
-```powershell
-iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1" | iex
-spicetify apply
+응답:
+```json
+{
+  "status": "ok",
+  "version": "0.7.3",
+  "provider": "musicxmatch",
+  "backend": "musixmatch + deezer(optional) + bugs + genie",
+  "cors": true,
+  "deezerConfigured": false,
+  "cacheEntries": 5,
+  "providerStatuses": {
+    "musicxmatch": "ready",
+    "deezer": "not-configured",
+    "bugs": "ready",
+    "genie": "ready"
+  }
+}
 ```
 
-서버 재시작:
-
-```powershell
-Start-ScheduledTask -TaskName "ivLyrics-MusicXMatch"
-```
-
-### macOS / Linux
-
+### GET /lyrics
+가사 조회
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
-spicetify apply
+curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=에픽하이"
 ```
 
-서버 재시작:
+파라미터:
+- `title`: 곡 제목 (필수*)
+- `artist`: 아티스트 (필수*)
+- `spotifyId`: Spotify Track ID (선택, 있으면 title/artist 불필요)
+- `durationMs`: 곡 길이 (밀리초, 선택)
+- `backend`: provider 지정 (auto/musicxmatch/deezer/bugs/genie, 기본: auto)
+- `debug`: 디버그 정보 포함 (0/1, 기본: 0)
 
-```bash
-launchctl kickstart -k gui/$(id -u)/com.ivlyrics.musicxmatch
-```
+*spotifyId가 있으면 title/artist 생략 가능
 
-Linux(systemd user)에서는:
-
-```bash
-systemctl --user restart ivlyrics-musicxmatch
-```
-
-설정 화면에는 두 가지 버튼이 있습니다.
-- `Update now`: 서버만 다시 설치하고 재시작합니다. 애드온 파일과 `spicetify apply`는 건너뜁니다.
-- `Update all`: 설치 스크립트를 전체 모드로 다시 실행해서 서버, 애드온 파일, `spicetify apply`를 한 번에 처리합니다.
-
-`Update all`은 Spotify UI가 다시 적용되므로 실행 시 잠깐 재로딩될 수 있습니다.
-두 버튼 모두 백그라운드 작업으로 예약되며, macOS/Linux에서는 `~/.ivlyrics-musicxmatch/update.log`에서 진행 상태를 바로 확인할 수 있습니다.
-
-## 제거
-
-서버 제거와 애드온 제거는 별개입니다. 둘 다 지우려면 아래 순서로 진행하세요.
-
-### Windows
-
-서버 제거:
-
-```powershell
-iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.ps1" | iex
-```
-
-애드온 제거:
-
-```powershell
-Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js" -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Deezer.js" -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Bugs.js" -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_Genie.js" -Force -ErrorAction SilentlyContinue
-spicetify config extensions Addon_Lyrics_MusicXMatch.js-
-spicetify config extensions Addon_Lyrics_Deezer.js-
-spicetify config extensions Addon_Lyrics_Bugs.js-
-spicetify config extensions Addon_Lyrics_Genie.js-
-spicetify apply
-```
-
-제거되는 주요 위치:
-
-```text
-%USERPROFILE%\.ivlyrics-musicxmatch
-%USERPROFILE%\.cargo\bin\ivlyrics-musicxmatch-server.exe
-%APPDATA%\spicetify\Extensions\Addon_Lyrics_MusicXMatch.js
-%APPDATA%\spicetify\Extensions\Addon_Lyrics_Deezer.js
-%APPDATA%\spicetify\Extensions\Addon_Lyrics_Bugs.js
-%APPDATA%\spicetify\Extensions\Addon_Lyrics_Genie.js
-```
-
-### macOS / Linux
-
-서버 제거:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.sh | bash
-```
-
-애드온 제거:
-
-```bash
-rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
-rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
-rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js
-rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_Genie.js
-spicetify config extensions Addon_Lyrics_MusicXMatch.js-
-spicetify config extensions Addon_Lyrics_Deezer.js-
-spicetify config extensions Addon_Lyrics_Bugs.js-
-spicetify config extensions Addon_Lyrics_Genie.js-
-spicetify apply
-```
-
-제거되는 주요 위치:
-
-```text
-~/.ivlyrics-musicxmatch
-~/.cargo/bin/ivlyrics-musicxmatch-server
-~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js
-~/.config/spicetify/Extensions/Addon_Lyrics_Genie.js
-```
-
-## CORS / Health 확인
-
-Spotify 웹뷰에서 로컬 서버를 읽으려면 CORS 헤더가 있어야 합니다. 아래 응답에 `access-control-allow-origin: *`가 보여야 정상입니다.
-
-```bash
-curl -i http://127.0.0.1:8092/health
-```
-
-정상 응답 예시:
-
-```text
-HTTP/1.1 200 OK
-access-control-allow-origin: *
-content-type: application/json
-```
-
-응답 JSON에는 아래 정보도 포함됩니다.
-
-```text
-status
-version
-provider
-backend
-cors
-deezerConfigured
-cacheEntries
-sessionFile
-logFile
-```
-
-가사 요청도 직접 확인할 수 있습니다.
-
-```bash
-curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%94%BD%ED%95%98%EC%9D%B4"
-```
-
-매칭 과정을 같이 보고 싶으면 `debug=1`을 붙이세요.
-
-```bash
-curl "http://127.0.0.1:8092/lyrics?title=Love%20Love%20Love&artist=%EC%97%90%ED%94%BD%ED%95%98%EC%9D%B4&debug=1"
-```
-
-이 경우 응답에 아래 같은 디버그 정보가 추가됩니다.
-
-```text
-debug.source
-debug.matchedBy
-debug.durationMs
-debug.selectedTrackId
-debug.selectedTrackDurationMs
-debug.searchVariants
-```
-
-업데이트 상태도 확인할 수 있습니다.
-
-```bash
-curl http://127.0.0.1:8092/update/check
-```
-
-업데이트를 예약하려면:
-
-```bash
-curl -X POST http://127.0.0.1:8092/update/apply
-```
-
-서버 + 애드온 + `spicetify apply`까지 한 번에 예약하려면:
-
-```bash
-curl -X POST http://127.0.0.1:8092/update/apply-all
-```
-
-Deezer 설정 상태를 확인하거나 저장하려면:
-
+### GET /config
+Deezer 설정 확인
 ```bash
 curl http://127.0.0.1:8092/config
+```
+
+### POST /config
+Deezer ARL 저장
+```bash
 curl -X POST http://127.0.0.1:8092/config \
   -H 'Content-Type: application/json' \
-  -d '{"deezerArl":"YOUR_ARL_COOKIE"}'
+  -d '{"deezerArl":"your_arl_cookie"}'
 ```
 
-## 로그
-
-기본 로그 파일 위치:
-
-```text
-Windows: %USERPROFILE%\.ivlyrics-musicxmatch\server.log
-macOS/Linux: ~/.ivlyrics-musicxmatch/server.log
+### DELETE /cache
+캐시 초기화
+```bash
+curl -X DELETE http://127.0.0.1:8092/cache
 ```
 
-Windows에서 로그를 실시간으로 보려면:
+---
 
+## 로그 확인
+
+**Windows**
 ```powershell
 Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.log" -Wait
 ```
 
-stdout/stderr까지 같이 보려면:
-
-```powershell
-Get-Content "$env:USERPROFILE\.ivlyrics-musicxmatch\server.stdout.log" -Wait
-```
-
-macOS/Linux:
-
+**macOS / Linux**
 ```bash
 tail -f ~/.ivlyrics-musicxmatch/server.log
 ```
 
-`Update now` / `Update all` 백그라운드 작업 로그:
+---
 
+## 개발
+
+### 빌드
 ```bash
-tail -f ~/.ivlyrics-musicxmatch/update.log
+cargo build --release
 ```
 
-## ivLyrics 로컬 패치 메모
+### 실행
+```bash
+cargo run
+```
 
-현재 `ivLyrics` 원본은 두 가지 이유로 로컬 패치를 해두는 편이 안정적입니다.
-- 빈 가사 배열 `[]`도 성공처럼 처리할 수 있어서, 앞선 provider가 빈 결과를 반환하면 다음 provider까지 내려오지 못하는 경우가 있습니다.
-- 여러 provider가 켜져 있을 때 먼저 나온 unsynced 결과를 바로 써서, 뒤에 있는 synced 결과를 놓칠 수 있습니다.
+### 테스트
+```bash
+cargo test
+```
 
-로컬에서 아래 파일을 패치해 두면 안정적입니다.
-- [LyricsAddonManager.js](/Users/oneul/Desktop/Workspace/ivLyrics/LyricsAddonManager.js)
+### 애드온 생성
+```bash
+node scripts/generate_addons.js
+```
 
-핵심 내용:
-- `karaoke`, `synced`, `unsynced`를 단순 truthy가 아니라 `배열 길이 > 0`으로 판단
-- 빈 결과면 다음 provider로 계속 진행
-- 여러 provider 결과를 비교해서 `karaoke > synced > unsynced` 순으로 더 좋은 결과를 선택
-- 앞 provider가 unsynced이고 뒤 provider가 synced면, 뒤 provider의 synced를 우선 선택
-- `karaoke`를 끄면 조기 종료 기준도 바뀌어서, 상위 provider에서 synced를 찾는 즉시 그 결과를 채택하고 아래 provider는 더 보지 않음
+### 버전 업데이트
+```bash
+./scripts/bump_version.sh 0.7.4
+```
 
-이 수정은 `ivLyrics` 업데이트 시 덮어써질 수 있으니, 업데이트 후 가사가 다시 안 뜨면 가장 먼저 이 부분을 확인하는 편이 좋습니다.
+---
+
+## 문제 해결
+
+### 가사가 표시되지 않음
+1. 서버 상태 확인: `curl http://127.0.0.1:8092/health`
+2. 로그 확인: `~/.ivlyrics-musicxmatch/server.log`
+3. ivLyrics 설정에서 provider 활성화 확인
+4. Spicetify extension 등록 확인: `spicetify config`
+
+### Deezer 가사가 안 나옴
+1. ARL 쿠키 설정 확인
+2. `/config` 엔드포인트로 설정 상태 확인
+3. Deezer 로그인 상태 확인 (쿠키 만료 가능)
+
+### 서버가 시작되지 않음
+**Windows**: 작업 스케줄러에서 "ivLyrics-MusicXMatch" 작업 확인
+**macOS**: `launchctl list | grep ivlyrics`
+**Linux**: `systemctl --user status ivlyrics-musicxmatch`
+
+---
+
+## 라이선스
+
+MIT License
+
+---
+
+## 기여
+
+이슈 및 PR 환영합니다: https://github.com/oneulddu/musicxmatch-api
