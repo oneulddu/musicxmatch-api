@@ -268,7 +268,10 @@ fn escape_query(value: &str) -> String {
     value.replace('"', "\\\"")
 }
 
-fn parse_lyrics(track: &DeezerTrack, lyrics: DeezerLyricsPayload) -> Result<DeezerLyricsResult, DeezerError> {
+fn parse_lyrics(
+    track: &DeezerTrack,
+    lyrics: DeezerLyricsPayload,
+) -> Result<DeezerLyricsResult, DeezerError> {
     if let Some(lines) = lyrics.synchronized_lines {
         let lrc = build_lrc_from_sync_lines(&lines);
         if !lrc.trim().is_empty() {
@@ -320,7 +323,11 @@ fn build_lrc_from_sync_lines(lines: &[SyncLine]) -> String {
             if text.is_empty() {
                 return None;
             }
-            Some(format!("{} {}", format_lrc_timestamp(line.milliseconds), text))
+            Some(format!(
+                "{} {}",
+                format_lrc_timestamp(line.milliseconds),
+                text
+            ))
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -1,3 +1,4 @@
+mod bugs;
 mod deezer;
 
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use bugs::{BugsClient, BugsError, BugsTrack};
 use deezer::{DeezerClient, DeezerError, DeezerTrack};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
@@ -27,12 +29,15 @@ const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
-const VERSION_INFO_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
+const BUGS_PROVIDER_NAME: &str = "bugs";
+const VERSION_INFO_URL: &str =
+    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
 
 #[derive(Clone)]
 struct AppState {
     mxm: Musixmatch,
     deezer: DeezerClient,
+    bugs: BugsClient,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     config: Arc<Mutex<AppConfig>>,
     config_path: PathBuf,
@@ -142,6 +147,7 @@ struct ConfigUpdatePayload {
 enum LyricsError {
     Musixmatch(MxmError),
     Deezer(DeezerError),
+    Bugs(BugsError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +155,7 @@ enum BackendMode {
     Auto,
     Musicxmatch,
     Deezer,
+    Bugs,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,7 +190,7 @@ struct Logger {
 #[tokio::main]
 async fn main() {
     let logger = Logger::new(log_file_path());
-    logger.log("server boot");
+    logger.log_tagged("Server", "서버 부팅 시작");
 
     let port = std::env::var("PORT")
         .ok()
@@ -194,6 +201,7 @@ async fn main() {
     let state = AppState {
         mxm: build_client(),
         deezer: DeezerClient::new(),
+        bugs: BugsClient::new(),
         cache: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(Mutex::new(load_config(&config_path))),
         config_path,
@@ -208,17 +216,22 @@ async fn main() {
         .route("/update/check", get(update_check))
         .route("/update/apply", post(update_apply))
         .route("/update/apply-all", post(update_apply_all))
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    logger.log(&format!("binding to {addr}"));
+    logger.log_tagged("Server", &format!("리스너 바인딩 준비: {addr}"));
     println!("ivLyrics MusicXMatch Server listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
-    logger.log("listener bound successfully");
+    logger.log_tagged("Server", "리스너 바인딩 완료");
     axum::serve(listener, app)
         .await
         .expect("server exited unexpectedly");
@@ -308,7 +321,11 @@ impl Logger {
         }
     }
 
-    fn log(&self, message: &str) {
+    fn log_tagged(&self, tag: &str, message: &str) {
+        self.write_line(&format!("[{tag}] {message}"));
+    }
+
+    fn write_line(&self, message: &str) {
         let line = format!("[{}] {message}\n", timestamp_string());
         print!("{line}");
         if let Ok(mut guard) = self.file.lock() {
@@ -328,12 +345,64 @@ fn timestamp_string() -> String {
     }
 }
 
+fn backend_log_tag(backend: BackendMode) -> &'static str {
+    match backend {
+        BackendMode::Auto => "Auto",
+        BackendMode::Musicxmatch => "MusicXMatch",
+        BackendMode::Deezer => "Deezer",
+        BackendMode::Bugs => "Bugs",
+    }
+}
+
+fn provider_log_tag(provider: &str) -> &'static str {
+    match provider {
+        PROVIDER_NAME => "MusicXMatch",
+        DEEZER_PROVIDER_NAME => "Deezer",
+        BUGS_PROVIDER_NAME => "Bugs",
+        _ => "Server",
+    }
+}
+
+fn display_str(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "-"
+    } else {
+        trimmed
+    }
+}
+
+fn display_opt_text(value: Option<&str>) -> &str {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value,
+        None => "-",
+    }
+}
+
+fn display_opt_u64(value: Option<u64>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 fn deserialize_boolish_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Option::<String>::deserialize(deserializer)?;
-    match value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         None => Ok(None),
         Some("1") | Some("true") | Some("TRUE") | Some("True") => Ok(Some(true)),
         Some("0") | Some("false") | Some("FALSE") | Some("False") => Ok(Some(false)),
@@ -344,29 +413,32 @@ where
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    state.logger.log("GET /health");
+    state.logger.log_tagged("Server", "GET /health 요청");
     let cache_entries = state.cache.lock().await.len();
     let deezer_configured = current_deezer_arl(&state).await.is_some();
     let update_available = latest_version_info()
         .await
         .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
         .unwrap_or(false);
-    json_response(StatusCode::OK, HealthPayload {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
-        provider: PROVIDER_NAME,
-        backend: "musixmatch-inofficial + deezer(optional)",
-        cors: true,
-        deezer_configured,
-        cache_entries,
-        session_file: session_file_path().display().to_string(),
-        log_file: log_file_path().display().to_string(),
-        update_available,
-    })
+    json_response(
+        StatusCode::OK,
+        HealthPayload {
+            status: "ok",
+            version: env!("CARGO_PKG_VERSION"),
+            provider: PROVIDER_NAME,
+            backend: "musixmatch-inofficial + deezer(optional) + bugs",
+            cors: true,
+            deezer_configured,
+            cache_entries,
+            session_file: session_file_path().display().to_string(),
+            log_file: log_file_path().display().to_string(),
+            update_available,
+        },
+    )
 }
 
 async fn clear_cache(State(state): State<AppState>) -> Response {
-    state.logger.log("DELETE /cache");
+    state.logger.log_tagged("Server", "DELETE /cache 요청");
     let mut cache = state.cache.lock().await;
     let deleted = cache.len();
     cache.clear();
@@ -374,7 +446,7 @@ async fn clear_cache(State(state): State<AppState>) -> Response {
 }
 
 async fn get_config(State(state): State<AppState>) -> Response {
-    state.logger.log("GET /config");
+    state.logger.log_tagged("Server", "GET /config 요청");
     json_response(StatusCode::OK, runtime_config_payload(&state).await)
 }
 
@@ -382,7 +454,7 @@ async fn save_config(
     State(state): State<AppState>,
     Json(payload): Json<ConfigUpdatePayload>,
 ) -> Response {
-    state.logger.log("POST /config");
+    state.logger.log_tagged("Server", "POST /config 요청");
 
     let next_arl = payload
         .deezer_arl
@@ -396,9 +468,7 @@ async fn save_config(
     if let Err(error) = save_config_file(&state.config_path, &next) {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorPayload {
-                detail: error,
-            },
+            ErrorPayload { detail: error },
         );
     }
 
@@ -417,26 +487,39 @@ async fn get_lyrics(
     let duration_secs = query.duration_ms.map(|value| value as f32 / 1000.0);
     let backend = parse_backend_mode(query.backend.as_deref());
     let include_debug = query.debug.unwrap_or(false);
-    state.logger.log(&format!(
-        "GET /lyrics title={title:?} artist={artist:?} spotify_id={spotify_id:?} backend={backend:?}"
-    ));
+    let request_tag = backend_log_tag(backend);
+    state.logger.log_tagged(
+        request_tag,
+        &format!(
+            "가사 조회 시작 title={:?} artist={:?} spotify_id={:?}",
+            display_str(&title),
+            display_str(&artist),
+            display_str(&spotify_id)
+        ),
+    );
 
     if spotify_id.is_empty() && (title.is_empty() || artist.is_empty()) {
-        state
-            .logger
-            .log("rejecting /lyrics request because title/artist are missing");
+        state.logger.log_tagged(
+            request_tag,
+            "가사 조회 요청 거부: spotify_id 없이 title 또는 artist가 비어 있음",
+        );
         return (
             StatusCode::BAD_REQUEST,
-            json_response(StatusCode::BAD_REQUEST, ErrorPayload {
-                detail: "title and artist are required when spotifyId is missing".to_string(),
-            }),
+            json_response(
+                StatusCode::BAD_REQUEST,
+                ErrorPayload {
+                    detail: "title and artist are required when spotifyId is missing".to_string(),
+                },
+            ),
         )
             .into_response();
     }
 
     let cache_key = build_cache_key(&title, &artist, &spotify_id, backend);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
-        state.logger.log(&format!("cache hit for key={cache_key}"));
+        state
+            .logger
+            .log_tagged(request_tag, &format!("캐시 적중 key={cache_key}"));
         return json_response(StatusCode::OK, cached);
     }
 
@@ -452,31 +535,40 @@ async fn get_lyrics(
     .await
     {
         Ok(mut payload) => {
-            state.logger.log(&format!(
-                "lyrics resolved provider={} track_id={:?} track_name={:?} has_lrc={} has_text={}",
-                payload.provider,
-                payload.track_id,
-                payload.track_name,
-                payload.lrc.is_some(),
-                payload.text.is_some()
-            ));
+            state.logger.log_tagged(
+                provider_log_tag(payload.provider),
+                &format!(
+                    "가사 조회 성공 title={:?} artist={:?} track_id={} synced={} plain={}",
+                    display_opt_text(payload.track_name.as_deref()),
+                    display_opt_text(payload.artist_name.as_deref()),
+                    display_opt_u64(payload.track_id),
+                    bool_text(payload.lrc.is_some()),
+                    bool_text(payload.text.is_some())
+                ),
+            );
             payload.cached = false;
             store_cache(&state, cache_key, payload.clone()).await;
             json_response(StatusCode::OK, payload)
         }
         Err(error) => {
             let (status, detail) = map_error(error);
-            state.logger.log(&format!(
-                "lyrics request failed status={} detail={detail}",
-                status.as_u16()
-            ));
+            state.logger.log_tagged(
+                request_tag,
+                &format!(
+                    "가사 조회 실패 title={:?} artist={:?} spotify_id={:?} status={} detail={detail}",
+                    display_str(&title),
+                    display_str(&artist),
+                    display_str(&spotify_id),
+                    status.as_u16()
+                ),
+            );
             json_response(status, ErrorPayload { detail })
         }
     }
 }
 
 async fn update_check(State(state): State<AppState>) -> Response {
-    state.logger.log("GET /update/check");
+    state.logger.log_tagged("Server", "GET /update/check 요청");
     match latest_version_info().await {
         Ok(info) => json_response(
             StatusCode::OK,
@@ -490,17 +582,12 @@ async fn update_check(State(state): State<AppState>) -> Response {
                 all_command: update_all_command_lines(),
             },
         ),
-        Err(error) => json_response(
-            StatusCode::BAD_GATEWAY,
-            ErrorPayload {
-                detail: error,
-            },
-        ),
+        Err(error) => json_response(StatusCode::BAD_GATEWAY, ErrorPayload { detail: error }),
     }
 }
 
 async fn update_apply(State(state): State<AppState>) -> Response {
-    state.logger.log("POST /update/apply");
+    state.logger.log_tagged("Server", "POST /update/apply 요청");
     match spawn_update_process(false) {
         Ok(()) => json_response(
             StatusCode::ACCEPTED,
@@ -512,15 +599,15 @@ async fn update_apply(State(state): State<AppState>) -> Response {
         ),
         Err(error) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorPayload {
-                detail: error,
-            },
+            ErrorPayload { detail: error },
         ),
     }
 }
 
 async fn update_apply_all(State(state): State<AppState>) -> Response {
-    state.logger.log("POST /update/apply-all");
+    state
+        .logger
+        .log_tagged("Server", "POST /update/apply-all 요청");
     match spawn_update_process(true) {
         Ok(()) => json_response(
             StatusCode::ACCEPTED,
@@ -532,9 +619,7 @@ async fn update_apply_all(State(state): State<AppState>) -> Response {
         ),
         Err(error) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorPayload {
-                detail: error,
-            },
+            ErrorPayload { detail: error },
         ),
     }
 }
@@ -543,7 +628,9 @@ fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
     let mut response = (status, Json(payload)).into_response();
     response.headers_mut().insert(
         CONTENT_TYPE,
-        "application/json; charset=utf-8".parse().expect("valid content-type header"),
+        "application/json; charset=utf-8"
+            .parse()
+            .expect("valid content-type header"),
     );
     response
 }
@@ -559,10 +646,16 @@ async fn latest_version_info() -> Result<VersionInfo, String> {
         .map_err(|error| error.to_string())?;
 
     if !response.status().is_success() {
-        return Err(format!("Latest version lookup failed ({})", response.status()));
+        return Err(format!(
+            "Latest version lookup failed ({})",
+            response.status()
+        ));
     }
 
-    response.json::<VersionInfo>().await.map_err(|error| error.to_string())
+    response
+        .json::<VersionInfo>()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn compare_versions(left: &str, right: &str) -> i32 {
@@ -587,14 +680,10 @@ fn parse_version(value: &str) -> Vec<u32> {
 }
 
 fn parse_backend_mode(value: Option<&str>) -> BackendMode {
-    match value
-        .unwrap_or("auto")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "musicxmatch" | "musixmatch" | "mxm" => BackendMode::Musicxmatch,
         "deezer" => BackendMode::Deezer,
+        "bugs" => BackendMode::Bugs,
         _ => BackendMode::Auto,
     }
 }
@@ -730,6 +819,7 @@ fn update_all_command_lines() -> Vec<String> {
             "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
             "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"".to_string(),
             "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"".to_string(),
+            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Bugs.js\"".to_string(),
             "spicetify apply".to_string(),
         ]
     }
@@ -739,6 +829,7 @@ fn update_all_command_lines() -> Vec<String> {
             "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
             "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js".to_string(),
             "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js".to_string(),
+            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js".to_string(),
             "spicetify apply".to_string(),
         ]
     }
@@ -748,7 +839,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let addon_steps = if include_addon {
-            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"; spicetify apply"
+            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Bugs.js\"; spicetify apply"
         } else {
             ""
         };
@@ -757,7 +848,13 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
             addon_steps
         );
         Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &command,
+            ])
             .spawn()
             .map_err(|error| error.to_string())?;
         return Ok(());
@@ -771,7 +868,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
             let _ = create_dir_all(parent);
         }
         let addon_steps = if include_addon {
-            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js; spicetify apply"
+            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js; spicetify apply"
         } else {
             ""
         };
@@ -781,7 +878,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
         );
         Command::new("sh")
             .env("PATH", path)
-            .args([ 
+            .args([
                 "-c",
                 &format!(
                     "nohup sh -c '{}' >> '{}' 2>&1 &",
@@ -824,6 +921,7 @@ fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: Backend
         BackendMode::Auto => "auto",
         BackendMode::Musicxmatch => "musicxmatch",
         BackendMode::Deezer => "deezer",
+        BackendMode::Bugs => "bugs",
     };
     if !spotify_id.is_empty() {
         return format!("{prefix}:spotify:{spotify_id}");
@@ -866,6 +964,11 @@ async fn fetch_payload(
             .await
             .map_err(LyricsError::Deezer)
         }
+        BackendMode::Bugs => {
+            fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug)
+                .await
+                .map_err(LyricsError::Bugs)
+        }
         BackendMode::Auto => match fetch_musixmatch_payload(
             &state.mxm,
             title,
@@ -878,11 +981,13 @@ async fn fetch_payload(
         {
             Ok(payload) => Ok(payload),
             Err(error) => {
-                state
-                    .logger
-                    .log(&format!("musixmatch lookup failed, trying Deezer fallback: {error}"));
+                state.logger.log_tagged(
+                    "MusicXMatch",
+                    &format!("조회 실패, fallback provider 시도: {error}"),
+                );
+                let mut deezer_error = None;
                 if let Some(arl) = current_deezer_arl(state).await {
-                    return fetch_deezer_payload(
+                    match fetch_deezer_payload(
                         &state.deezer,
                         &arl,
                         title,
@@ -891,9 +996,32 @@ async fn fetch_payload(
                         include_debug,
                     )
                     .await
-                    .map_err(LyricsError::Deezer);
+                    {
+                        Ok(payload) => return Ok(payload),
+                        Err(next_error) => {
+                            state.logger.log_tagged(
+                                "Deezer",
+                                &format!("fallback 조회 실패, Bugs provider 시도: {next_error}"),
+                            );
+                            deezer_error = Some(next_error);
+                        }
+                    }
                 }
-                Err(LyricsError::Musixmatch(error))
+
+                match fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug)
+                    .await
+                {
+                    Ok(payload) => Ok(payload),
+                    Err(next_error) => {
+                        if let Some(deezer_error) = deezer_error {
+                            Err(LyricsError::Deezer(deezer_error))
+                        } else if matches!(error, MxmError::NotFound | MxmError::NotAvailable) {
+                            Err(LyricsError::Bugs(next_error))
+                        } else {
+                            Err(LyricsError::Musixmatch(error))
+                        }
+                    }
+                }
             }
         },
     }
@@ -1044,6 +1172,44 @@ async fn fetch_deezer_payload(
     Err(DeezerError::NotAvailable)
 }
 
+async fn fetch_bugs_payload(
+    bugs: &BugsClient,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+    include_debug: bool,
+) -> Result<LyricsPayload, BugsError> {
+    let resolution = resolve_bugs_tracks(bugs, title, artist, duration_secs).await?;
+
+    for track in resolution.tracks {
+        match bugs.fetch_lyrics_for_track(&track).await {
+            Ok(payload) => {
+                return Ok(LyricsPayload {
+                    provider: BUGS_PROVIDER_NAME,
+                    track_id: Some(payload.track_id),
+                    track_name: Some(payload.track_name),
+                    artist_name: Some(payload.artist_name),
+                    lrc: payload.lrc,
+                    text: payload.text,
+                    cached: false,
+                    debug: include_debug.then(|| DebugPayload {
+                        source: "bugs_search",
+                        matched_by: resolution.matched_by,
+                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+                        selected_track_id: Some(payload.track_id),
+                        selected_track_duration_ms: payload.duration_ms,
+                        search_variants: resolution.search_variants.clone(),
+                    }),
+                });
+            }
+            Err(BugsError::NotFound | BugsError::NotAvailable) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(BugsError::NotAvailable)
+}
+
 struct TrackResolution {
     track: Track,
     matched_by: &'static str,
@@ -1052,6 +1218,12 @@ struct TrackResolution {
 
 struct DeezerTrackResolution {
     tracks: Vec<DeezerTrack>,
+    matched_by: &'static str,
+    search_variants: Vec<String>,
+}
+
+struct BugsTrackResolution {
+    tracks: Vec<BugsTrack>,
     matched_by: &'static str,
     search_variants: Vec<String>,
 }
@@ -1104,7 +1276,9 @@ async fn resolve_track(
         matched_by = "matcher:variants";
         for title_variant in &title_variants {
             for artist_variant in &artist_variants {
-                attempted_variants.push(format!("matcher title={title_variant} | artist={artist_variant}"));
+                attempted_variants.push(format!(
+                    "matcher title={title_variant} | artist={artist_variant}"
+                ));
                 if let Ok(matched) = mxm
                     .matcher_track(title_variant, artist_variant, "", false, false, false)
                     .await
@@ -1118,7 +1292,9 @@ async fn resolve_track(
     if tracks_by_id.is_empty() {
         matched_by = "matcher:original";
         attempted_variants.push(format!("matcher title={title} | artist={artist}"));
-        let matched = mxm.matcher_track(title, artist, "", false, false, false).await?;
+        let matched = mxm
+            .matcher_track(title, artist, "", false, false, false)
+            .await?;
         tracks_by_id.insert(matched.track_id, matched);
     }
 
@@ -1196,6 +1372,64 @@ async fn resolve_deezer_tracks(
     })
 }
 
+async fn resolve_bugs_tracks(
+    bugs: &BugsClient,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> Result<BugsTrackResolution, BugsError> {
+    let mut tracks_by_id = HashMap::new();
+    let title_variants = title_variants(title);
+    let artist_variants = artist_variants(artist);
+    let mut attempted_variants = Vec::new();
+    let mut matched_by = "search:title+artist";
+
+    for title_variant in &title_variants {
+        for artist_variant in &artist_variants {
+            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
+            let tracks = bugs
+                .search_tracks(Some(title_variant), Some(artist_variant))
+                .await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
+        matched_by = "search:title";
+        for title_variant in &title_variants {
+            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
+            let tracks = bugs.search_tracks(Some(title_variant), None).await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        return Err(BugsError::NotFound);
+    }
+
+    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        score_bugs_track(right, title, artist, duration_secs)
+            .partial_cmp(&score_bugs_track(left, title, artist, duration_secs))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by));
+
+    if candidates.is_empty() {
+        return Err(BugsError::NotFound);
+    }
+
+    Ok(BugsTrackResolution {
+        tracks: candidates,
+        matched_by,
+        search_variants: attempted_variants,
+    })
+}
+
 async fn search_tracks(
     mxm: &Musixmatch,
     title: Option<&str>,
@@ -1217,7 +1451,59 @@ async fn search_tracks(
         .await
 }
 
-fn score_deezer_track(track: &DeezerTrack, title: &str, artist: &str, duration_secs: Option<f32>) -> f32 {
+fn score_deezer_track(
+    track: &DeezerTrack,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> f32 {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let mut score = similarity(&want_title, &track_title) * 70.0
+        + similarity(&want_artist, &track_artist) * 30.0;
+
+    if want_title == track_title {
+        score += 15.0;
+    } else if track_title.contains(&want_title) {
+        score += 8.0;
+    }
+
+    if want_artist == track_artist || track_artist.contains(&want_artist) {
+        score += 10.0;
+    }
+
+    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
+        let actual_duration = actual_ms as f32 / 1000.0;
+        score += duration_score((actual_duration - want_duration).abs());
+    }
+
+    let noise = format!("{track_title} {track_artist}");
+    for word in [
+        "acoustic",
+        "cover",
+        "instrumental",
+        "karaoke",
+        "live",
+        "remix",
+        "tribute",
+    ] {
+        if noise.contains(word) {
+            score -= 18.0;
+        }
+    }
+
+    score
+}
+
+fn score_bugs_track(
+    track: &BugsTrack,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> f32 {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
     let track_title = simplify(&track.track_name);
@@ -1261,6 +1547,35 @@ fn score_deezer_track(track: &DeezerTrack, title: &str, artist: &str, duration_s
 
 fn is_acceptable_deezer_match(
     track: &DeezerTrack,
+    title: &str,
+    artist: &str,
+    matched_by: &str,
+) -> bool {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let title_similarity = similarity(&want_title, &track_title);
+    let artist_similarity = if want_artist.is_empty() {
+        1.0
+    } else {
+        similarity(&want_artist, &track_artist)
+    };
+    let artist_contains = !want_artist.is_empty()
+        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+
+    match matched_by {
+        "search:title" => {
+            title_similarity >= 0.8
+                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+        }
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+    }
+}
+
+fn is_acceptable_bugs_match(
+    track: &BugsTrack,
     title: &str,
     artist: &str,
     matched_by: &str,
@@ -1408,7 +1723,7 @@ fn similarity(a: &str, b: &str) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let len = a.len().max(b.len()) as f32;
+    let len = a.chars().count().max(b.chars().count()) as f32;
     let matches = a
         .chars()
         .zip(b.chars())
@@ -1509,9 +1824,14 @@ fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by: &st
         && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
 
     match matched_by {
-        "search:title" => title_similarity >= 0.8 && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains),
+        "search:title" => {
+            title_similarity >= 0.8
+                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+        }
         "search:artist" => artist_similarity >= 0.5 && title_similarity >= 0.3,
-        "matcher:original" | "matcher:variants" => title_similarity >= 0.45 || artist_similarity >= 0.45,
+        "matcher:original" | "matcher:variants" => {
+            title_similarity >= 0.45 || artist_similarity >= 0.45
+        }
         _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
     }
 }
@@ -1527,14 +1847,23 @@ fn strip_lyrics_footer(value: &str) -> String {
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
+        LyricsError::Bugs(BugsError::NotFound) => {
+            (StatusCode::NOT_FOUND, "No tracks found".to_string())
+        }
+        LyricsError::Bugs(BugsError::NotAvailable) => (
+            StatusCode::NOT_FOUND,
+            "No lyrics are available for this track".to_string(),
+        ),
+        LyricsError::Bugs(BugsError::Provider(detail)) => {
+            (StatusCode::BAD_GATEWAY, format!("Bugs error: {detail}"))
+        }
         LyricsError::Deezer(DeezerError::ConfigMissing) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Deezer ARL cookie is not configured.".to_string(),
         ),
-        LyricsError::Deezer(DeezerError::NotFound) => (
-            StatusCode::NOT_FOUND,
-            "No tracks found".to_string(),
-        ),
+        LyricsError::Deezer(DeezerError::NotFound) => {
+            (StatusCode::NOT_FOUND, "No tracks found".to_string())
+        }
         LyricsError::Deezer(DeezerError::NotAvailable) => (
             StatusCode::NOT_FOUND,
             "No lyrics are available for this track".to_string(),
@@ -1543,37 +1872,36 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Deezer authentication failed: {detail}"),
         ),
-        LyricsError::Deezer(DeezerError::Provider(detail)) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Deezer error: {detail}"),
-        ),
+        LyricsError::Deezer(DeezerError::Provider(detail)) => {
+            (StatusCode::BAD_GATEWAY, format!("Deezer error: {detail}"))
+        }
         LyricsError::Musixmatch(error) => match error {
-        MxmError::NotFound => (StatusCode::NOT_FOUND, "No tracks found".to_string()),
-        MxmError::NotAvailable => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
-        MxmError::Ratelimit => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Musixmatch rate limit reached. Wait a minute and try again.".to_string(),
-        ),
-        MxmError::TokenExpired => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Musixmatch session expired. Retry in a moment.".to_string(),
-        ),
-        MxmError::MissingCredentials => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Musixmatch credentials are required for this request.".to_string(),
-        ),
-        MxmError::WrongCredentials => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Configured Musixmatch credentials are invalid.".to_string(),
-        ),
-        MxmError::MusixmatchError { status_code, msg } => (
-            StatusCode::BAD_GATEWAY,
-            format!("Musixmatch error {status_code}: {msg}"),
-        ),
-        other => (StatusCode::BAD_GATEWAY, other.to_string()),
+            MxmError::NotFound => (StatusCode::NOT_FOUND, "No tracks found".to_string()),
+            MxmError::NotAvailable => (
+                StatusCode::NOT_FOUND,
+                "No lyrics are available for this track".to_string(),
+            ),
+            MxmError::Ratelimit => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Musixmatch rate limit reached. Wait a minute and try again.".to_string(),
+            ),
+            MxmError::TokenExpired => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Musixmatch session expired. Retry in a moment.".to_string(),
+            ),
+            MxmError::MissingCredentials => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Musixmatch credentials are required for this request.".to_string(),
+            ),
+            MxmError::WrongCredentials => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Configured Musixmatch credentials are invalid.".to_string(),
+            ),
+            MxmError::MusixmatchError { status_code, msg } => (
+                StatusCode::BAD_GATEWAY,
+                format!("Musixmatch error {status_code}: {msg}"),
+            ),
+            other => (StatusCode::BAD_GATEWAY, other.to_string()),
         },
     }
 }
@@ -1584,8 +1912,17 @@ mod tests {
 
     #[test]
     fn collapse_to_words_preserves_unicode_letters() {
-        assert_eq!(collapse_to_words("에픽하이 feat. 융진"), "에픽하이 feat 융진");
+        assert_eq!(
+            collapse_to_words("에픽하이 feat. 융진"),
+            "에픽하이 feat 융진"
+        );
         assert_eq!(collapse_to_words("끊었어? (demo)"), "끊었어 demo");
+    }
+
+    #[test]
+    fn similarity_counts_unicode_characters_not_utf8_bytes() {
+        assert_eq!(similarity("끊었어", "끊었어"), 1.0);
+        assert!(similarity("끊었어", "끊었어 demo") > 0.3);
     }
 
     #[test]
@@ -1599,7 +1936,9 @@ mod tests {
     #[test]
     fn artist_variants_strip_featured_and_split_collaborators() {
         let variants = artist_variants("Epik High feat. Yoong Jin of Casker");
-        assert!(variants.iter().any(|value| value == "Epik High feat. Yoong Jin of Casker"));
+        assert!(variants
+            .iter()
+            .any(|value| value == "Epik High feat. Yoong Jin of Casker"));
         assert!(variants.iter().any(|value| value == "Epik High"));
     }
 
@@ -1645,9 +1984,16 @@ mod tests {
     fn parse_backend_mode_handles_expected_values() {
         assert_eq!(parse_backend_mode(None), BackendMode::Auto);
         assert_eq!(parse_backend_mode(Some("auto")), BackendMode::Auto);
-        assert_eq!(parse_backend_mode(Some("musicxmatch")), BackendMode::Musicxmatch);
-        assert_eq!(parse_backend_mode(Some("musixmatch")), BackendMode::Musicxmatch);
+        assert_eq!(
+            parse_backend_mode(Some("musicxmatch")),
+            BackendMode::Musicxmatch
+        );
+        assert_eq!(
+            parse_backend_mode(Some("musixmatch")),
+            BackendMode::Musicxmatch
+        );
         assert_eq!(parse_backend_mode(Some("deezer")), BackendMode::Deezer);
+        assert_eq!(parse_backend_mode(Some("bugs")), BackendMode::Bugs);
     }
 
     #[test]
@@ -1655,9 +2001,12 @@ mod tests {
         let auto = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Auto);
         let mxm = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Musicxmatch);
         let deezer = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Deezer);
+        let bugs = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Bugs);
         assert_ne!(auto, mxm);
         assert_ne!(mxm, deezer);
         assert_ne!(auto, deezer);
+        assert_ne!(deezer, bugs);
+        assert_ne!(mxm, bugs);
     }
 
     #[test]

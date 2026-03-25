@@ -5,7 +5,7 @@ Write-Host ""
 
 $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $ExtensionsDir = "$env:APPDATA\spicetify\Extensions"
-$AddonNames = @("Addon_Lyrics_MusicXMatch.js", "Addon_Lyrics_Deezer.js")
+$AddonNames = @("Addon_Lyrics_MusicXMatch.js", "Addon_Lyrics_Deezer.js", "Addon_Lyrics_Bugs.js")
 $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $ServerUrl = "http://127.0.0.1:8092"
@@ -78,5 +78,5 @@ if (-not $Spicetify) {
 Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
 Write-Host "Server running at $ServerUrl"
-Write-Host "Addon paths: $(Join-Path $ExtensionsDir $AddonNames[0]), $(Join-Path $ExtensionsDir $AddonNames[1])"
+Write-Host "Addon paths: $(Join-Path $ExtensionsDir $AddonNames[0]), $(Join-Path $ExtensionsDir $AddonNames[1]), $(Join-Path $ExtensionsDir $AddonNames[2])"
 Write-Host ""

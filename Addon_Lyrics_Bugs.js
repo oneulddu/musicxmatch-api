@@ -1,7 +1,7 @@
 /**
  * @addon-type  lyrics
- * @id          musicxmatch-provider
- * @name        MusicXMatch Provider
+ * @id          bugs-provider
+ * @name        Bugs Provider
   * @version     0.6.1
  * @author      oneulddu
  */
@@ -9,18 +9,18 @@
 (() => {
     'use strict';
 
-    const ADDON_ID = 'musicxmatch-provider';
-    const BACKEND = 'musicxmatch';
+    const ADDON_ID = 'bugs-provider';
+    const BACKEND = 'bugs';
     const DEFAULT_SERVER_URL = 'http://127.0.0.1:8092';
     const DEFAULT_TIMEOUT_SEC = 15;
 
     const ADDON_INFO = {
         id: ADDON_ID,
-        name: 'MusicXMatch Provider',
+        name: 'Bugs Provider',
         author: 'oneulddu',
         version: '0.6.1',
         description: {
-            en: 'Fetches synced or plain lyrics from MusicXMatch through the local bridge server.',
+            en: 'Fetches synced or plain lyrics from Bugs through the local bridge server.',
         },
         supports: {
             karaoke: false,
@@ -200,7 +200,7 @@
         const React = Spicetify.React;
         const { useEffect, useState } = React;
 
-        return function MusicXMatchSettings() {
+        return function BugsSettings() {
             const [serverUrl, setServerUrl] = useState(() => getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL));
             const [timeoutSec, setTimeoutSec] = useState(() => getSetting(SETTING.TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC));
             const [status, setStatus] = useState(null);
@@ -258,216 +258,103 @@
 
             useEffect(() => {
                 let cancelled = false;
-
-                fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((result) => {
+                fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((nextStatus) => {
                     if (!cancelled) {
-                        setVersionStatus(result);
+                        setVersionStatus(nextStatus);
                     }
                 });
-
                 return () => {
                     cancelled = true;
                 };
             }, [serverUrl]);
 
-            const box = {
-                background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                borderRadius: 10,
-                padding: '14px 16px',
-            };
-            const input = {
-                width: '100%',
-                background: 'rgba(255,255,255,0.08)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 6,
-                color: 'inherit',
-                padding: '8px 10px',
-                boxSizing: 'border-box',
-            };
-            const button = {
-                padding: '8px 12px',
-                borderRadius: 6,
-                border: 'none',
-                cursor: 'pointer',
-                background: '#1db954',
-                color: '#000',
-                fontWeight: 700,
-            };
-            const commandBox = {
-                marginTop: 14,
-                padding: '10px 12px',
-                borderRadius: 8,
-                background: 'rgba(0,0,0,0.25)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                fontSize: 12,
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-            };
-            const updateNeeded = !!(versionStatus && (versionStatus.addonOutdated || versionStatus.serverOutdated));
-
-            return React.createElement('div', { style: box },
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'MusicXMatch server'),
+            return React.createElement(
+                'div',
+                { style: { display: 'grid', gap: 12 } },
+                React.createElement('label', null, 'Server URL'),
                 React.createElement('input', {
-                    type: 'text',
                     value: serverUrl,
-                    style: input,
-                    placeholder: DEFAULT_SERVER_URL,
                     onChange: (event) => saveUrl(event.target.value),
+                    placeholder: DEFAULT_SERVER_URL,
                 }),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local lyrics server and point this addon to it.'),
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, `Timeout: ${timeoutSec}s`),
+                React.createElement('label', null, 'Request timeout (seconds)'),
                 React.createElement('input', {
-                    type: 'range',
-                    min: '5',
-                    max: '60',
-                    step: '5',
-                    value: String(timeoutSec),
-                    style: { width: '100%' },
-                    onChange: (event) => saveTimeout(Number(event.target.value)),
+                    type: 'number',
+                    min: 5,
+                    step: 1,
+                    value: timeoutSec,
+                    onChange: (event) => saveTimeout(event.target.value),
                 }),
-                React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 } },
-                    React.createElement('button', {
-                        style: button,
-                        onClick: testConnection,
-                        disabled: status === 'testing',
-                    }, status === 'testing' ? 'Testing...' : 'Test connection'),
-                    status === 'ok' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Connected'),
-                    status === 'fail' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed')
+                React.createElement(
+                    'div',
+                    { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                    React.createElement('button', { onClick: testConnection }, 'Test connection'),
+                    React.createElement('button', { onClick: runUpdate }, 'Update now'),
+                    React.createElement('button', { onClick: runUpdateAll }, 'Update all')
                 ),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 14 } },
-                    `Addon: ${ADDON_INFO.version}`,
-                    versionStatus?.currentServerVersion ? ` | Server: ${versionStatus.currentServerVersion}` : ''
-                ),
-                versionStatus?.latestAddonVersion && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 6 } },
-                    `Latest addon: ${versionStatus.latestAddonVersion}`,
-                    versionStatus.latestServerVersion ? ` | Latest server: ${versionStatus.latestServerVersion}` : ''
-                ),
-                updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
-                    React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
+                status && React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, `Connection: ${status}`),
+                updateStatus && React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, `Server update: ${updateStatus}`),
+                updateAllStatus && React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, `Full update: ${updateAllStatus}`),
+                versionStatus && React.createElement(
+                    'div',
+                    { style: { display: 'grid', gap: 4, fontSize: 12, opacity: 0.85 } },
+                    React.createElement('div', null, `Addon version: ${versionStatus.currentAddonVersion || 'unknown'}`),
+                    React.createElement('div', null, `Server version: ${versionStatus.currentServerVersion || 'unknown'}`),
+                    React.createElement('div', null, `Latest addon version: ${versionStatus.latestAddonVersion || 'unknown'}`),
+                    React.createElement('div', null, `Latest server version: ${versionStatus.latestServerVersion || 'unknown'}`),
                     React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'You can update just the server, or update the server, all addon files, and run spicetify apply together.'),
-                    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
-                        React.createElement('button', {
-                            style: button,
-                            onClick: runUpdate,
-                            disabled: updateStatus === 'updating',
-                        }, updateStatus === 'updating' ? 'Updating...' : 'Update now'),
-                        React.createElement('button', {
-                            style: button,
-                            onClick: runUpdateAll,
-                            disabled: updateAllStatus === 'updating',
-                        }, updateAllStatus === 'updating' ? 'Updating all...' : 'Update all'),
-                        updateStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Scheduled'),
-                        updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed'),
-                        updateAllStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'All scheduled'),
-                        updateAllStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update all failed')
-                    ),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Server only'),
-                    React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\n')),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all'),
-                    React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\n'))
-                ),
-                versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },
-                    `Version check failed: ${versionStatus.error}`
+                    versionStatus.serverCommand.length > 0 && React.createElement('pre', { style: { whiteSpace: 'pre-wrap' } }, versionStatus.serverCommand.join('\n')),
+                    versionStatus.allCommand.length > 0 && React.createElement('pre', { style: { whiteSpace: 'pre-wrap' } }, versionStatus.allCommand.join('\n')),
+                    versionStatus.error && React.createElement('div', null, `Update check failed: ${versionStatus.error}`)
                 )
             );
         };
     }
 
-    async function getLyrics(info) {
-        const result = {
-            uri: info.uri,
-            provider: ADDON_ID,
-            karaoke: null,
-            synced: null,
-            unsynced: null,
-            copyright: null,
-            error: null,
-        };
-
-        const title = (info.title || '').trim();
-        const artist = (info.artist || '').trim();
-        if (!title || !artist) {
-            result.error = 'Track title and artist are required.';
-            return result;
-        }
-
+    async function requestLyrics(info) {
         const serverUrl = getServerUrl();
-        const timeout = getTimeoutMs();
-        const spotifyId = typeof info.uri === 'string' && info.uri.startsWith('spotify:track:')
-            ? info.uri.split(':')[2]
-            : '';
-        const params = new URLSearchParams({ title, artist });
+        const timeoutMs = getTimeoutMs();
+        const params = new URLSearchParams();
         params.set('backend', BACKEND);
-        if (spotifyId) {
-            params.set('spotifyId', spotifyId);
+        params.set('title', info.title || '');
+        params.set('artist', info.artist || '');
+        if (info.uri?.startsWith('spotify:track:')) {
+            params.set('spotifyId', info.uri.split(':').pop());
         }
-        if (typeof info.duration === 'number' && Number.isFinite(info.duration) && info.duration > 0) {
-            params.set('durationMs', String(Math.round(info.duration)));
+        if (info.duration) {
+            params.set('durationMs', String(info.duration));
         }
 
-        let response;
-        try {
-            const fetchResult = await fetchJsonWithFallback(serverUrl, `/lyrics?${params.toString()}`, timeout);
-            response = fetchResult.response;
-            if (fetchResult.baseUrl !== serverUrl) {
-                setSetting(SETTING.SERVER_URL, fetchResult.baseUrl);
-            }
-        } catch (error) {
-            result.error = `Server connection failed: ${error.message}`;
-            return result;
+        const { response, baseUrl } = await fetchJsonWithFallback(serverUrl, `/lyrics?${params.toString()}`, timeoutMs);
+        if (baseUrl !== serverUrl) {
+            setSetting(SETTING.SERVER_URL, baseUrl);
         }
 
         if (!response.ok) {
-            try {
-                const payload = await response.json();
-                result.error = payload.detail || `HTTP ${response.status}`;
-            } catch {
-                result.error = `HTTP ${response.status}`;
-            }
-            return result;
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || `HTTP ${response.status}`);
         }
 
-        let payload;
-        try {
-            payload = await response.json();
-        } catch {
-            result.error = 'Could not parse server response.';
-            return result;
-        }
+        const payload = await response.json();
+        const parsed = payload.lrc ? parseLrc(payload.lrc) : { synced: null, unsynced: null };
+        const plain = payload.text ? parsePlainLyrics(payload.text) : null;
 
-        if (payload.lrc) {
-            const parsed = parseLrc(payload.lrc);
-            result.synced = parsed.synced;
-            result.unsynced = parsed.unsynced;
-        } else if (payload.text) {
-            result.unsynced = parsePlainLyrics(payload.text);
-        }
-
-        if (!result.synced && !result.unsynced) {
-            result.error = 'No usable lyrics were returned.';
-        }
-
-        return result;
+        return {
+            synced: parsed.synced,
+            unsynced: parsed.unsynced || plain,
+            provider: ADDON_ID,
+            copyright: null,
+        };
     }
 
-    const MusicXMatchAddon = {
+    if (!window.LyricsAddonManager?.register) {
+        console.warn('[Bugs Provider] LyricsAddonManager is not available.');
+        return;
+    }
+
+    window.LyricsAddonManager.register({
         ...ADDON_INFO,
-        async init() {
-            window.__ivLyricsDebugLog?.(`[${ADDON_ID}] initialized`);
-        },
         getSettingsUI,
-        getLyrics,
-    };
-
-    const register = () => {
-        if (window.LyricsAddonManager) {
-            window.LyricsAddonManager.register(MusicXMatchAddon);
-            return;
-        }
-        setTimeout(register, 100);
-    };
-
-    register();
+        getLyrics: requestLyrics,
+    });
 })();

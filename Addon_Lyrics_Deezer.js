@@ -2,7 +2,7 @@
  * @addon-type  lyrics
  * @id          deezer-provider
  * @name        Deezer Provider
- * @version     0.5.0
+  * @version     0.6.1
  * @author      oneulddu
  */
 
@@ -18,7 +18,7 @@
         id: ADDON_ID,
         name: 'Deezer Provider',
         author: 'oneulddu',
-        version: '0.5.0',
+        version: '0.6.1',
         description: {
             en: 'Fetches synced or plain lyrics from Deezer through the local bridge server.',
         },
@@ -455,7 +455,7 @@
                 ),
                 updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
                     React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'You can update just the server, or update the server, both addon files, and run spicetify apply together.'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'You can update just the server, or update the server, all addon files, and run spicetify apply together.'),
                     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
                         React.createElement('button', {
                             style: button,
