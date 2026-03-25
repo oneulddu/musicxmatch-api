@@ -143,7 +143,7 @@ struct DebugPayload {
     search_variants: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ErrorPayload {
     detail: String,
 }
@@ -160,7 +160,7 @@ struct AppConfig {
     deezer_arl: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ConfigPayload {
     #[serde(rename = "deezerArlConfigured")]
     deezer_arl_configured: bool,
@@ -1793,9 +1793,11 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use crate::matching::{
         collapse_to_words, duration_score, normalize_connectors, similarity, simplify,
     };
+    use std::fs;
 
     #[test]
     fn collapse_to_words_preserves_unicode_letters() {
@@ -1911,5 +1913,105 @@ mod tests {
     fn deezer_short_titles_follow_same_title_only_rule() {
         assert!(!can_use_title_only_fallback("KO"));
         assert!(can_use_title_only_fallback("신호는 잘 지켜"));
+    }
+
+    fn test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ivlyrics-musicxmatch-{name}-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    fn test_state(config: AppConfig, config_path: PathBuf) -> AppState {
+        let session_path = test_path("session");
+        AppState {
+            mxm: Musixmatch::builder()
+                .storage_file(session_path)
+                .timeout(Duration::from_secs(1))
+                .build()
+                .expect("test musixmatch client should build"),
+            deezer: DeezerClient::new(Duration::from_secs(1)),
+            bugs: BugsClient::new(Duration::from_secs(1)),
+            genie: GenieClient::new(Duration::from_secs(1)),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            config: Arc::new(Mutex::new(config)),
+            config_path,
+            logger: Logger::new(test_path("log")),
+        }
+    }
+
+    async fn parse_response_json<T: for<'de> Deserialize<'de>>(response: Response) -> T {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+        serde_json::from_slice(&bytes).expect("response body should be valid json")
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_masked_deezer_arl_preview() {
+        let config_path = test_path("config");
+        let state = test_state(
+            AppConfig {
+                deezer_arl: Some("abcdefghijklmnop".to_string()),
+            },
+            config_path,
+        );
+
+        let response = get_config(State(state)).await;
+        let payload: ConfigPayload = parse_response_json(response).await;
+
+        assert!(payload.deezer_arl_configured);
+        assert_eq!(payload.deezer_arl_preview.as_deref(), Some("abcd…mnop"));
+    }
+
+    #[tokio::test]
+    async fn save_config_clears_deezer_arl_and_persists_file() {
+        let config_path = test_path("config");
+        let state = test_state(
+            AppConfig {
+                deezer_arl: Some("abcdefghijklmnop".to_string()),
+            },
+            config_path.clone(),
+        );
+
+        let response = save_config(
+            State(state.clone()),
+            Json(ConfigUpdatePayload { deezer_arl: None }),
+        )
+        .await;
+        let payload: ConfigPayload = parse_response_json(response).await;
+
+        assert!(!payload.deezer_arl_configured);
+        assert_eq!(payload.deezer_arl_preview, None);
+
+        let saved = fs::read_to_string(&config_path).expect("config should be written");
+        let parsed: AppConfig = serde_json::from_str(&saved).expect("config json should parse");
+        assert_eq!(parsed.deezer_arl, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_config_writes_private_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path.clone());
+
+        let response = save_config(
+            State(state),
+            Json(ConfigUpdatePayload { deezer_arl: None }),
+        )
+        .await;
+        let _: ConfigPayload = parse_response_json(response).await;
+
+        let mode = fs::metadata(&config_path)
+            .expect("config should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
