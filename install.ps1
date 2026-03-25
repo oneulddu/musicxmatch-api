@@ -12,6 +12,7 @@ $ServerUrl = "http://127.0.0.1:8092"
 $RunnerScript = Join-Path $InstallDir "run-server.ps1"
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupScript = Join-Path $StartupDir "ivLyrics-MusicXMatch.cmd"
+$PreferredAutoStartMode = if ($env:IVLYRICS_WINDOWS_AUTOSTART) { $env:IVLYRICS_WINDOWS_AUTOSTART.Trim().ToLowerInvariant() } else { "startup-folder" }
 $SkipAddons = $env:IVLYRICS_SKIP_ADDONS -eq "1"
 
 function Install-Addons {
@@ -74,15 +75,19 @@ $RunnerBody = @"
 "@
 Set-Content -Path $RunnerScript -Value $RunnerBody -Encoding UTF8
 
-$AutoStartMode = "scheduled-task"
-try {
-    $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerScript`"" -WorkingDirectory $InstallDir
-    $Trigger = New-ScheduledTaskTrigger -AtLogOn
-    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
-} catch {
-    $AutoStartMode = "startup-folder"
-    Write-Warning "Scheduled Task 등록이 거부되어 Startup 폴더 방식으로 대체합니다."
+$AutoStartMode = "startup-folder"
+if ($PreferredAutoStartMode -eq "scheduled-task") {
+    try {
+        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerScript`"" -WorkingDirectory $InstallDir
+        $Trigger = New-ScheduledTaskTrigger -AtLogOn
+        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
+        $AutoStartMode = "scheduled-task"
+    } catch {
+        Write-Warning "Scheduled Task 등록이 거부되어 Startup 폴더 방식으로 대체합니다."
+        Install-StartupFallback -RunnerScriptPath $RunnerScript -StartupScriptPath $StartupScript
+    }
+} else {
     Install-StartupFallback -RunnerScriptPath $RunnerScript -StartupScriptPath $StartupScript
 }
 
