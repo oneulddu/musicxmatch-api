@@ -1,7 +1,7 @@
 use crate::bugs::BugsTrack;
 use crate::deezer::DeezerTrack;
 use crate::genie::GenieTrack;
-use musixmatch_inofficial::models::Track;
+use crate::musixmatch::Track;
 
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut values = Vec::new();

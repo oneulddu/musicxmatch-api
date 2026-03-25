@@ -3,6 +3,7 @@ mod deezer;
 mod genie;
 mod logging;
 mod matching;
+mod musixmatch;
 
 use std::collections::HashMap;
 use std::fs::create_dir_all;
@@ -32,8 +33,7 @@ use matching::{
     score_bugs_track, score_deezer_track, score_genie_track, score_track, strip_lyrics_footer,
     title_variants,
 };
-use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
-use musixmatch_inofficial::{Error as MxmError, Musixmatch};
+use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
@@ -355,7 +355,7 @@ async fn health(State(state): State<AppState>) -> Response {
             status: "ok",
             version: env!("CARGO_PKG_VERSION"),
             provider: PROVIDER_NAME,
-            backend: "musixmatch-inofficial + deezer(optional) + bugs + genie",
+            backend: "musixmatch + deezer(optional) + bugs + genie",
             cors: true,
             deezer_configured,
             cache_entries,
@@ -1594,15 +1594,7 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Musixmatch session expired. Retry in a moment.".to_string(),
             ),
-            MxmError::MissingCredentials => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Musixmatch credentials are required for this request.".to_string(),
-            ),
-            MxmError::WrongCredentials => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Configured Musixmatch credentials are invalid.".to_string(),
-            ),
-            MxmError::MusixmatchError { status_code, msg } => (
+            MxmError::Provider { status_code, msg } => (
                 StatusCode::BAD_GATEWAY,
                 format!("Musixmatch error {status_code}: {msg}"),
             ),
