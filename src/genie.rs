@@ -118,8 +118,10 @@ impl GenieClient {
             .text()
             .await
             .map_err(|error| GenieError::Provider(error.to_string()))?;
-        let Some(parsed) = parse_lyrics_payload(&body) else {
-            return Err(GenieError::NotAvailable);
+        let parsed = match parse_lyrics_payload(&body) {
+            Ok(Some(parsed)) => parsed,
+            Ok(None) => return Err(GenieError::NotAvailable),
+            Err(detail) => return Err(GenieError::Provider(detail)),
         };
 
         let lrc = format_genie_lrc(&parsed);
@@ -154,57 +156,61 @@ fn parse_search_tracks(body: &str) -> Vec<GenieTrack> {
 
     for row in body.split("<tr class=\"list\"").skip(1) {
         let row = format!("<tr class=\"list\"{row}");
-        let Some(track_id) = capture_between(&row, "songid=\"", "\"")
-            .and_then(|value| value.parse::<u64>().ok())
-        else {
+        let Some(track) = parse_search_track_row(&row) else {
             continue;
         };
-
-        if !seen.insert(track_id) {
-            continue;
+        if seen.insert(track.track_id) {
+            tracks.push(track);
         }
-
-        let Some(info_block) = capture_between(&row, "<td class=\"info\">", "</td>") else {
-            continue;
-        };
-        let Some(title_block) = capture_anchor_block(info_block, "title ellipsis") else {
-            continue;
-        };
-        let Some(artist_block) = capture_anchor_block(info_block, "artist ellipsis") else {
-            continue;
-        };
-
-        let track_name = html_entity_decode(&cleanup_text(&strip_tags(title_block)));
-        let artist_name = html_entity_decode(&cleanup_text(&strip_tags(artist_block)));
-        if track_name.is_empty() || artist_name.is_empty() {
-            continue;
-        }
-
-        tracks.push(GenieTrack {
-            track_id,
-            track_name,
-            artist_name,
-            duration_ms: None,
-        });
     }
 
     tracks
 }
 
-fn parse_lyrics_payload(body: &str) -> Option<BTreeMap<u64, String>> {
+fn parse_search_track_row(row: &str) -> Option<GenieTrack> {
+    let track_id = capture_between(row, "songid=\"", "\"")?.parse::<u64>().ok()?;
+    let info_block = capture_between(row, "<td class=\"info\">", "</td>")?;
+
+    let title = capture_anchor_attr_or_text(info_block, "title ellipsis", "title")
+        .filter(|value| !value.is_empty())?;
+    let artist = capture_anchor_attr_or_text(info_block, "artist ellipsis", "title")
+        .filter(|value| !value.is_empty())?;
+
+    let duration_ms = capture_between(info_block, "<span class=\"duration\">", "</span>")
+        .and_then(|value| parse_duration_ms(&cleanup_text(value)));
+
+    Some(GenieTrack {
+        track_id,
+        track_name: title,
+        artist_name: artist,
+        duration_ms,
+    })
+}
+
+fn parse_lyrics_payload(body: &str) -> Result<Option<BTreeMap<u64, String>>, String> {
     let trimmed = body.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NOT FOUND LYRICS") {
-        return None;
+        return Ok(None);
     }
 
-    let json = extract_jsonp_payload(trimmed)?;
-    let value: Value = serde_json::from_str(json).ok()?;
-    let object = value.as_object()?;
+    let Some(json) = extract_jsonp_payload(trimmed) else {
+        return Err("Genie lyrics payload was not valid JSONP".to_string());
+    };
+    let value: Value =
+        serde_json::from_str(json).map_err(|error| format!("Genie lyrics JSON parse failed: {error}"))?;
+    let Some(object) = value.as_object() else {
+        return Err("Genie lyrics payload body was not an object".to_string());
+    };
     let mut entries = BTreeMap::new();
 
     for (key, value) in object {
-        let timestamp_ms = key.parse::<u64>().ok()?;
-        let line = value.as_str()?.trim();
+        let Some(timestamp_ms) = key.parse::<u64>().ok() else {
+            continue;
+        };
+        let Some(line) = value.as_str() else {
+            continue;
+        };
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
@@ -212,9 +218,9 @@ fn parse_lyrics_payload(body: &str) -> Option<BTreeMap<u64, String>> {
     }
 
     if entries.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(entries)
+        Ok(Some(entries))
     }
 }
 
@@ -253,13 +259,21 @@ fn capture_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a 
     Some(&remainder[..end_index])
 }
 
-fn capture_anchor_block<'a>(haystack: &'a str, class_name: &str) -> Option<&'a str> {
+fn capture_anchor_attr_or_text(haystack: &str, class_name: &str, attr_name: &str) -> Option<String> {
     let marker = format!("class=\"{class_name}\"");
     let class_index = haystack.find(&marker)?;
     let before = &haystack[..class_index];
     let anchor_start = before.rfind("<a")?;
     let anchor = &haystack[anchor_start..];
-    capture_between(anchor, ">", "</a>")
+
+    if let Some(value) = capture_between(anchor, &format!("{attr_name}=\""), "\"") {
+        let cleaned = cleanup_display_text(value);
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+
+    capture_between(anchor, ">", "</a>").map(cleanup_display_text)
 }
 
 fn strip_tags(value: &str) -> String {
@@ -288,16 +302,49 @@ fn cleanup_text(value: &str) -> String {
         .to_string()
 }
 
+fn cleanup_display_text(value: &str) -> String {
+    html_entity_decode(&cleanup_text(&strip_tags(value)))
+}
+
+fn parse_duration_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let parts = value
+        .split(':')
+        .map(|part| part.trim().parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+
+    let total_seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
+        [hours, minutes, seconds] => hours
+            .saturating_mul(3600)
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(*seconds),
+        _ => return None,
+    };
+
+    Some(total_seconds.saturating_mul(1000))
+}
+
 fn html_entity_decode(value: &str) -> String {
     value
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
         .replace("&#39;", "'")
         .replace("&apos;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&#x27;", "'")
         .replace("&#x2F;", "/")
+        .replace("&#40;", "(")
+        .replace("&#41;", ")")
+        .replace("&#91;", "[")
+        .replace("&#93;", "]")
+        .replace("&#44;", ",")
 }
 
 fn format_lrc_timestamp_ms(milliseconds: u64) -> String {
@@ -315,7 +362,9 @@ mod tests {
     #[test]
     fn parse_genie_jsonp_payload() {
         let payload = r#"null({"1030":"그대여","7010":"그대여"})"#;
-        let parsed = parse_lyrics_payload(payload).expect("lyrics should parse");
+        let parsed = parse_lyrics_payload(payload)
+            .expect("lyrics should parse")
+            .expect("lyrics should exist");
         assert_eq!(parsed.get(&1030).map(String::as_str), Some("그대여"));
         assert_eq!(parsed.get(&7010).map(String::as_str), Some("그대여"));
     }
@@ -351,5 +400,30 @@ mod tests {
         assert_eq!(tracks[0].track_id, 101374441);
         assert_eq!(tracks[0].track_name, "How We Came (Feat. pH-1)");
         assert_eq!(tracks[0].artist_name, "Lil Moshpit & Fleeky Bang");
+    }
+
+    #[test]
+    fn parse_search_tracks_prefers_title_attribute_and_duration() {
+        let body = r##"
+        <tr class="list" songid="101374441">
+            <td class="info">
+                <a href="#" class="title ellipsis" title="How We Came (Feat. pH-1)">
+                    <span class="icon icon-title">TITLE</span><span class="t_point"></span>How We Came
+                </a>
+                <a href="#" class="artist ellipsis">Lil Moshpit &amp; Fleeky Bang</a>
+                <span class="duration">2:57</span>
+            </td>
+        </tr>
+        "##;
+        let tracks = parse_search_tracks(body);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].track_name, "How We Came (Feat. pH-1)");
+        assert_eq!(tracks[0].duration_ms, Some(177000));
+    }
+
+    #[test]
+    fn parse_lyrics_payload_rejects_invalid_jsonp() {
+        let error = parse_lyrics_payload("hello world").expect_err("should fail");
+        assert!(error.contains("JSONP"));
     }
 }
