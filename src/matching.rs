@@ -3,6 +3,21 @@ use crate::deezer::DeezerTrack;
 use crate::genie::GenieTrack;
 use crate::musixmatch::Track;
 
+const TITLE_SIMILARITY_WEIGHT: f32 = 70.0;
+const ARTIST_SIMILARITY_WEIGHT: f32 = 30.0;
+const EXACT_TITLE_BONUS: f32 = 15.0;
+const PARTIAL_TITLE_BONUS: f32 = 8.0;
+const ARTIST_MATCH_BONUS: f32 = 10.0;
+const SUBTITLE_BONUS: f32 = 8.0;
+const RICHSYNC_BONUS: f32 = 4.0;
+const LYRICS_BONUS: f32 = 2.0;
+const NOISE_PENALTY: f32 = 18.0;
+const VERY_CLOSE_DURATION_BONUS: f32 = 18.0;
+const CLOSE_DURATION_BONUS: f32 = 10.0;
+const SMALL_DURATION_BONUS: f32 = 4.0;
+const MEDIUM_DURATION_PENALTY: f32 = -8.0;
+const LARGE_DURATION_PENALTY: f32 = -20.0;
+
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut values = Vec::new();
     let base = title.trim();
@@ -28,6 +43,23 @@ pub fn artist_variants(artist: &str) -> Vec<String> {
 
 pub fn normalize(value: &str) -> String {
     collapse_to_words(value).to_lowercase()
+}
+
+pub fn exact_title_artist_match(
+    track_title: &str,
+    track_artist: &str,
+    title: &str,
+    artist: &str,
+) -> bool {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let actual_title = simplify(track_title);
+    let actual_artist = normalize(track_artist);
+
+    want_title == actual_title
+        && (want_artist == actual_artist
+            || actual_artist.contains(&want_artist)
+            || want_artist.contains(&actual_artist))
 }
 
 pub fn simplify(value: &str) -> String {
@@ -60,17 +92,17 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
     let track_title = simplify(&track.track_name);
     let track_artist = normalize(&track.artist_name);
 
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
+    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
+        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
 
     if want_title == track_title {
-        score += 15.0;
+        score += EXACT_TITLE_BONUS;
     } else if track_title.contains(&want_title) {
-        score += 8.0;
+        score += PARTIAL_TITLE_BONUS;
     }
 
     if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
+        score += ARTIST_MATCH_BONUS;
     }
 
     if let Some(want_duration) = duration_secs {
@@ -79,13 +111,13 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
     }
 
     if track.has_subtitles {
-        score += 8.0;
+        score += SUBTITLE_BONUS;
     }
     if track.has_richsync {
-        score += 4.0;
+        score += RICHSYNC_BONUS;
     }
     if track.has_lyrics {
-        score += 2.0;
+        score += LYRICS_BONUS;
     }
 
     let noise = format!("{track_title} {track_artist}");
@@ -99,7 +131,7 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
         "tribute",
     ] {
         if noise.contains(word) {
-            score -= 18.0;
+            score -= NOISE_PENALTY;
         }
     }
 
@@ -117,17 +149,17 @@ pub fn score_deezer_track(
     let track_title = simplify(&track.track_name);
     let track_artist = normalize(&track.artist_name);
 
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
+    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
+        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
 
     if want_title == track_title {
-        score += 15.0;
+        score += EXACT_TITLE_BONUS;
     } else if track_title.contains(&want_title) {
-        score += 8.0;
+        score += PARTIAL_TITLE_BONUS;
     }
 
     if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
+        score += ARTIST_MATCH_BONUS;
     }
 
     if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
@@ -146,7 +178,7 @@ pub fn score_deezer_track(
         "tribute",
     ] {
         if noise.contains(word) {
-            score -= 18.0;
+            score -= NOISE_PENALTY;
         }
     }
 
@@ -164,17 +196,17 @@ pub fn score_bugs_track(
     let track_title = simplify(&track.track_name);
     let track_artist = normalize(&track.artist_name);
 
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
+    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
+        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
 
     if want_title == track_title {
-        score += 15.0;
+        score += EXACT_TITLE_BONUS;
     } else if track_title.contains(&want_title) {
-        score += 8.0;
+        score += PARTIAL_TITLE_BONUS;
     }
 
     if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
+        score += ARTIST_MATCH_BONUS;
     }
 
     if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
@@ -193,7 +225,7 @@ pub fn score_bugs_track(
         "tribute",
     ] {
         if noise.contains(word) {
-            score -= 18.0;
+            score -= NOISE_PENALTY;
         }
     }
 
@@ -211,17 +243,17 @@ pub fn score_genie_track(
     let track_title = simplify(&track.track_name);
     let track_artist = normalize(&track.artist_name);
 
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
+    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
+        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
 
     if want_title == track_title {
-        score += 15.0;
+        score += EXACT_TITLE_BONUS;
     } else if track_title.contains(&want_title) {
-        score += 8.0;
+        score += PARTIAL_TITLE_BONUS;
     }
 
     if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
+        score += ARTIST_MATCH_BONUS;
     }
 
     if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
@@ -240,7 +272,7 @@ pub fn score_genie_track(
         "tribute",
     ] {
         if noise.contains(word) {
-            score -= 18.0;
+            score -= NOISE_PENALTY;
         }
     }
 
@@ -249,15 +281,15 @@ pub fn score_genie_track(
 
 pub fn duration_score(delta_secs: f32) -> f32 {
     if delta_secs <= 1.5 {
-        18.0
+        VERY_CLOSE_DURATION_BONUS
     } else if delta_secs <= 3.0 {
-        10.0
+        CLOSE_DURATION_BONUS
     } else if delta_secs <= 6.0 {
-        4.0
+        SMALL_DURATION_BONUS
     } else if delta_secs >= 20.0 {
-        -20.0
+        LARGE_DURATION_PENALTY
     } else if delta_secs >= 10.0 {
-        -8.0
+        MEDIUM_DURATION_PENALTY
     } else {
         0.0
     }

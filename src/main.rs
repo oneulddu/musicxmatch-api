@@ -8,7 +8,7 @@ mod musixmatch;
 use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +28,8 @@ use logging::{
     provider_log_tag, translate_log_detail, Logger,
 };
 use matching::{
-    artist_variants, can_use_title_only_fallback, is_acceptable_bugs_match,
+    artist_variants, can_use_title_only_fallback, exact_title_artist_match,
+    is_acceptable_bugs_match,
     is_acceptable_deezer_match, is_acceptable_genie_match, is_acceptable_match, normalize,
     score_bugs_track, score_deezer_track, score_genie_track, score_track, strip_lyrics_footer,
     title_variants,
@@ -39,6 +40,7 @@ use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
@@ -95,6 +97,16 @@ struct HealthPayload {
     log_file: String,
     #[serde(rename = "updateAvailable")]
     update_available: bool,
+    #[serde(rename = "providerStatuses")]
+    provider_statuses: ProviderStatusesPayload,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ProviderStatusesPayload {
+    musicxmatch: &'static str,
+    deezer: &'static str,
+    bugs: &'static str,
+    genie: &'static str,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -222,6 +234,8 @@ async fn main() {
         config_path,
         logger: logger.clone(),
     };
+
+    spawn_cache_cleanup_task(state.cache.clone(), logger.clone());
 
     let app = Router::new()
         .route("/health", get(health))
@@ -364,6 +378,16 @@ async fn health(State(state): State<AppState>) -> Response {
             session_file: session_file_path().display().to_string(),
             log_file: log_file_path().display().to_string(),
             update_available,
+            provider_statuses: ProviderStatusesPayload {
+                musicxmatch: "ready",
+                deezer: if deezer_configured {
+                    "configured"
+                } else {
+                    "not-configured"
+                },
+                bugs: "ready",
+                genie: "ready",
+            },
         },
     )
 }
@@ -420,6 +444,12 @@ async fn save_config(
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorPayload { detail: error },
+        );
+    }
+    if let Err(error) = set_private_file_permissions(&state.config_path) {
+        state.logger.log_tagged(
+            "Server",
+            &format!("설정 파일 권한 조정 실패 path={} detail={error}", state.config_path.display()),
         );
     }
 
@@ -909,6 +939,45 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
     );
 }
 
+fn spawn_cache_cleanup_task(
+    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    logger: Logger,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CACHE_CLEANUP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let now = Instant::now();
+            let mut cache = cache.lock().await;
+            let before = cache.len();
+            cache.retain(|_, entry| entry.expires_at > now);
+            let removed = before.saturating_sub(cache.len());
+            if removed > 0 {
+                logger.log_tagged(
+                    "Server",
+                    &format!("캐시 정리 완료 removed={} remaining={}", removed, cache.len()),
+                );
+            }
+        }
+    });
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: BackendMode) -> String {
     let prefix = match backend {
         BackendMode::Auto => "auto",
@@ -1314,12 +1383,15 @@ async fn resolve_track(
     let mut attempted_variants = Vec::new();
     let mut matched_by = "search:title+artist";
 
-    for title_variant in &title_variants {
+    'title_artist_search: for title_variant in &title_variants {
         for artist_variant in &artist_variants {
             attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
             let tracks = search_tracks(mxm, Some(title_variant), Some(artist_variant)).await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+            if has_exact_musixmatch_candidate(&tracks_by_id, title, artist) {
+                break 'title_artist_search;
             }
         }
     }
@@ -1400,7 +1472,7 @@ async fn resolve_deezer_tracks(
     let mut attempted_variants = Vec::new();
     let mut matched_by = "search:title+artist";
 
-    for title_variant in &title_variants {
+    'title_artist_search: for title_variant in &title_variants {
         for artist_variant in &artist_variants {
             attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
             let tracks = deezer
@@ -1408,6 +1480,9 @@ async fn resolve_deezer_tracks(
                 .await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+            if has_exact_deezer_candidate(&tracks_by_id, title, artist) {
+                break 'title_artist_search;
             }
         }
     }
@@ -1458,7 +1533,7 @@ async fn resolve_bugs_tracks(
     let mut attempted_variants = Vec::new();
     let mut matched_by = "search:title+artist";
 
-    for title_variant in &title_variants {
+    'title_artist_search: for title_variant in &title_variants {
         for artist_variant in &artist_variants {
             attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
             let tracks = bugs
@@ -1466,6 +1541,9 @@ async fn resolve_bugs_tracks(
                 .await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+            if has_exact_bugs_candidate(&tracks_by_id, title, artist) {
+                break 'title_artist_search;
             }
         }
     }
@@ -1516,7 +1594,7 @@ async fn resolve_genie_tracks(
     let mut attempted_variants = Vec::new();
     let mut matched_by = "search:title+artist";
 
-    for title_variant in &title_variants {
+    'title_artist_search: for title_variant in &title_variants {
         for artist_variant in &artist_variants {
             attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
             let tracks = genie
@@ -1524,6 +1602,9 @@ async fn resolve_genie_tracks(
                 .await?;
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+            if has_exact_genie_candidate(&tracks_by_id, title, artist) {
+                break 'title_artist_search;
             }
         }
     }
@@ -1581,6 +1662,46 @@ async fn search_tracks(
         .s_track_rating(SortOrder::Desc)
         .send(10, 1)
         .await
+}
+
+fn has_exact_musixmatch_candidate(
+    tracks_by_id: &HashMap<u64, Track>,
+    title: &str,
+    artist: &str,
+) -> bool {
+    tracks_by_id.values().any(|track| {
+        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
+    })
+}
+
+fn has_exact_deezer_candidate(
+    tracks_by_id: &HashMap<u64, DeezerTrack>,
+    title: &str,
+    artist: &str,
+) -> bool {
+    tracks_by_id.values().any(|track| {
+        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
+    })
+}
+
+fn has_exact_bugs_candidate(
+    tracks_by_id: &HashMap<u64, BugsTrack>,
+    title: &str,
+    artist: &str,
+) -> bool {
+    tracks_by_id.values().any(|track| {
+        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
+    })
+}
+
+fn has_exact_genie_candidate(
+    tracks_by_id: &HashMap<u64, GenieTrack>,
+    title: &str,
+    artist: &str,
+) -> bool {
+    tracks_by_id.values().any(|track| {
+        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
+    })
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
