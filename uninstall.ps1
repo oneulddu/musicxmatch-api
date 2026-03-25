@@ -4,6 +4,8 @@ $InstallDir = "$env:USERPROFILE\.ivlyrics-musicxmatch"
 $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $RunnerScript = Join-Path $InstallDir "run-server.ps1"
+$StartupDir = [Environment]::GetFolderPath("Startup")
+$StartupScript = Join-Path $StartupDir "ivLyrics-MusicXMatch.cmd"
 
 Write-Host ""
 Write-Host "Removing MusicXMatch Provider..." -ForegroundColor Yellow
@@ -13,6 +15,11 @@ Get-Process | Where-Object { $_.Path -like "*ivlyrics-musicxmatch-server*" } | S
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "  [OK] Scheduled task removed" -ForegroundColor Green
+}
+
+if (Test-Path $StartupScript) {
+    Remove-Item $StartupScript -Force -ErrorAction SilentlyContinue
+    Write-Host "  [OK] Startup entry removed" -ForegroundColor Green
 }
 
 if (Test-Path $InstallDir) {

@@ -10,6 +10,8 @@ $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $ServerUrl = "http://127.0.0.1:8092"
 $RunnerScript = Join-Path $InstallDir "run-server.ps1"
+$StartupDir = [Environment]::GetFolderPath("Startup")
+$StartupScript = Join-Path $StartupDir "ivLyrics-MusicXMatch.cmd"
 $SkipAddons = $env:IVLYRICS_SKIP_ADDONS -eq "1"
 
 function Install-Addons {
@@ -40,6 +42,19 @@ function Install-Addons {
     spicetify apply
 }
 
+function Install-StartupFallback {
+    param (
+        [string]$RunnerScriptPath,
+        [string]$StartupScriptPath
+    )
+
+    $StartupBody = @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$RunnerScriptPath"
+"@
+    Set-Content -Path $StartupScriptPath -Value $StartupBody -Encoding ASCII
+}
+
 Write-Host "[1/7] Creating installation directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
@@ -59,13 +74,24 @@ $RunnerBody = @"
 "@
 Set-Content -Path $RunnerScript -Value $RunnerBody -Encoding UTF8
 
-$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerScript`"" -WorkingDirectory $InstallDir
-$Trigger = New-ScheduledTaskTrigger -AtLogOn
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
+$AutoStartMode = "scheduled-task"
+try {
+    $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunnerScript`"" -WorkingDirectory $InstallDir
+    $Trigger = New-ScheduledTaskTrigger -AtLogOn
+    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
+} catch {
+    $AutoStartMode = "startup-folder"
+    Write-Warning "Scheduled Task 등록이 거부되어 Startup 폴더 방식으로 대체합니다."
+    Install-StartupFallback -RunnerScriptPath $RunnerScript -StartupScriptPath $StartupScript
+}
 
 Write-Host "[5/7] Starting server..." -ForegroundColor Yellow
-Start-ScheduledTask -TaskName $TaskName
+if ($AutoStartMode -eq "scheduled-task") {
+    Start-ScheduledTask -TaskName $TaskName
+} else {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunnerScript -WorkingDirectory $InstallDir | Out-Null
+}
 Start-Sleep -Seconds 2
 
 Write-Host "[6/7] Verifying health and CORS..." -ForegroundColor Yellow
@@ -92,5 +118,6 @@ if ($SkipAddons) {
 Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
 Write-Host "Server running at $ServerUrl"
+Write-Host "Auto-start mode: $AutoStartMode"
 Write-Host "Addon paths: $(Join-Path $ExtensionsDir $AddonNames[0]), $(Join-Path $ExtensionsDir $AddonNames[1]), $(Join-Path $ExtensionsDir $AddonNames[2]), $(Join-Path $ExtensionsDir $AddonNames[3])"
 Write-Host ""
