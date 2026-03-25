@@ -139,10 +139,11 @@
 
 ### 4.2 실제 fixture 기반 파서 테스트
 **현재 상태**
-- `Bugs`, `Genie`는 샘플 문자열 테스트가 있습니다.
+- 부분 반영: `Bugs`, `Genie`에 실제 fixture 파일 기반 파서 테스트가 추가되었습니다.
 
 **제안**
-- 실제 HTML/JSONP/lyrics payload fixture 파일을 둬서 회귀 테스트 강화
+- fixture 범위를 더 넓혀 provider별 edge case를 추가
+- 필요하면 `MusicXMatch`와 `Deezer` 응답 샘플도 fixture화
 
 **우선순위**
 - 중간

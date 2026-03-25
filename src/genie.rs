@@ -426,4 +426,30 @@ mod tests {
         let error = parse_lyrics_payload("hello world").expect_err("should fail");
         assert!(error.contains("JSONP"));
     }
+
+    #[test]
+    fn parse_search_tracks_fixture_extracts_expected_rows() {
+        let body = include_str!("../tests/fixtures/genie/search_result.html");
+        let tracks = parse_search_tracks(body);
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].track_id, 101374441);
+        assert_eq!(tracks[0].track_name, "How We Came (Feat. pH-1)");
+        assert_eq!(tracks[0].artist_name, "Lil Moshpit & Fleeky Bang");
+        assert_eq!(tracks[0].duration_ms, Some(177000));
+        assert_eq!(tracks[1].track_name, "끊었어? (demo)");
+        assert_eq!(tracks[1].artist_name, "Chan (찬), 기원 (Giwon)");
+    }
+
+    #[test]
+    fn parse_lyrics_payload_fixture_extracts_timestamped_lines() {
+        let payload = include_str!("../tests/fixtures/genie/lyrics_payload.jsonp");
+        let parsed = parse_lyrics_payload(payload)
+            .expect("fixture should parse")
+            .expect("fixture should contain lyrics");
+
+        assert_eq!(parsed.get(&1030).map(String::as_str), Some("그대여"));
+        assert_eq!(parsed.get(&7010).map(String::as_str), Some("오늘은"));
+        assert_eq!(parsed.get(&24210).map(String::as_str), Some("벚꽃엔딩"));
+    }
 }

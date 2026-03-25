@@ -290,6 +290,7 @@ struct BugsLyricsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::from_str;
 
     #[test]
     fn parse_duration_supports_mm_ss() {
@@ -308,5 +309,27 @@ mod tests {
     fn normalize_plain_lyrics_collapses_crlf() {
         let parsed = normalize_plain_lyrics("A\r\nB\r\n");
         assert_eq!(parsed, "A\nB");
+    }
+
+    #[test]
+    fn parse_search_response_fixture_extracts_tracks() {
+        let body = include_str!("../tests/fixtures/bugs/search_response.json");
+        let payload: BugsSearchResponse = from_str(body).expect("fixture json should parse");
+
+        assert_eq!(payload.list.len(), 2);
+        assert_eq!(payload.list[0].track_id, 6196642);
+        assert_eq!(payload.list[0].track_title, "How We Came (Feat. pH-1)");
+        assert_eq!(join_artist_names(&payload.list[0].artists), "Lil Moshpit, Fleeky Bang");
+        assert_eq!(parse_duration_ms(payload.list[0].len.as_deref()), Some(177000));
+    }
+
+    #[test]
+    fn parse_synced_lyrics_fixture_into_lrc() {
+        let payload = include_str!("../tests/fixtures/bugs/synced_lyrics.txt");
+        let parsed = parse_synced_lyrics(payload).expect("fixture lyrics should parse");
+
+        assert!(parsed.contains("[00:06.90]존나 멋 존나 멋 그건 누구겠어 뱃"));
+        assert!(parsed.contains("[00:11.10]마이크로폰 첵 원투 난 일차원으로 해"));
+        assert!(parsed.contains("[00:14.72]나는 꽤 멋쟁이야"));
     }
 }
