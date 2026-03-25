@@ -82,7 +82,7 @@ struct LyricsQuery {
     debug: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct HealthPayload {
     status: &'static str,
     version: &'static str,
@@ -103,7 +103,7 @@ struct HealthPayload {
     provider_statuses: ProviderStatusesPayload,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ProviderStatusesPayload {
     musicxmatch: &'static str,
     deezer: &'static str,
@@ -379,37 +379,40 @@ where
 
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log_tagged("Server", "GET /health 요청");
-    let cache_entries = state.cache.lock().await.len();
-    let deezer_configured = current_deezer_arl(&state).await.is_some();
     let update_available = latest_version_info()
         .await
         .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
         .unwrap_or(false);
-    json_response(
-        StatusCode::OK,
-        HealthPayload {
-            status: "ok",
-            version: env!("CARGO_PKG_VERSION"),
-            provider: PROVIDER_NAME,
-            backend: "musixmatch + deezer(optional) + bugs + genie",
-            cors: true,
-            deezer_configured,
-            cache_entries,
-            session_file: session_file_path().display().to_string(),
-            log_file: log_file_path().display().to_string(),
-            update_available,
-            provider_statuses: ProviderStatusesPayload {
-                musicxmatch: "ready",
-                deezer: if deezer_configured {
-                    "configured"
-                } else {
-                    "not-configured"
-                },
-                bugs: "ready",
-                genie: "ready",
+    let payload = health_payload(&state, update_available).await;
+    json_response(StatusCode::OK, payload)
+}
+
+async fn health_payload(state: &AppState, update_available: bool) -> HealthPayload {
+    let cache_entries = state.cache.lock().await.len();
+    let deezer_configured = current_deezer_arl(state).await.is_some();
+
+    HealthPayload {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+        provider: PROVIDER_NAME,
+        backend: "musixmatch + deezer(optional) + bugs + genie",
+        cors: true,
+        deezer_configured,
+        cache_entries,
+        session_file: session_file_path().display().to_string(),
+        log_file: log_file_path().display().to_string(),
+        update_available,
+        provider_statuses: ProviderStatusesPayload {
+            musicxmatch: "ready",
+            deezer: if deezer_configured {
+                "configured"
+            } else {
+                "not-configured"
             },
+            bugs: "ready",
+            genie: "ready",
         },
-    )
+    }
 }
 
 async fn clear_cache(State(state): State<AppState>) -> Response {
@@ -2013,5 +2016,20 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn health_payload_reports_provider_statuses() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+
+        let payload = health_payload(&state, false).await;
+
+        assert_eq!(payload.status, "ok");
+        assert!(!payload.deezer_configured);
+        assert_eq!(payload.provider_statuses.musicxmatch, "ready");
+        assert_eq!(payload.provider_statuses.deezer, "not-configured");
+        assert_eq!(payload.provider_statuses.bugs, "ready");
+        assert_eq!(payload.provider_statuses.genie, "ready");
     }
 }
