@@ -2032,4 +2032,85 @@ mod tests {
         assert_eq!(payload.provider_statuses.bugs, "ready");
         assert_eq!(payload.provider_statuses.genie, "ready");
     }
+
+    #[derive(Debug, Deserialize)]
+    struct LyricsPayloadView {
+        provider: String,
+        #[serde(rename = "trackId")]
+        track_id: Option<u64>,
+        lrc: Option<String>,
+        cached: bool,
+    }
+
+    #[tokio::test]
+    async fn get_lyrics_rejects_missing_title_or_artist_without_spotify_id() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+
+        let response = get_lyrics(
+            State(state),
+            Query(LyricsQuery {
+                title: Some(String::new()),
+                artist: Some("CAMO".to_string()),
+                spotify_id: None,
+                duration_ms: None,
+                backend: None,
+                debug: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: ErrorPayload = parse_response_json(response).await;
+        assert_eq!(
+            payload.detail,
+            "title and artist are required when spotifyId is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_lyrics_returns_cached_payload_without_network_fetch() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+        let cache_key = build_cache_key("Tell Me", "CAMO", "spotify123", BackendMode::Deezer);
+
+        store_cache(
+            &state,
+            cache_key,
+            LyricsPayload {
+                provider: "deezer",
+                track_id: Some(42),
+                track_name: Some("Tell Me".to_string()),
+                artist_name: Some("CAMO".to_string()),
+                lrc: Some("[00:01.00]hello".to_string()),
+                text: None,
+                cached: false,
+                matched_by: Some("track_id"),
+                debug: None,
+            },
+        )
+        .await;
+
+        let response = get_lyrics(
+            State(state),
+            Query(LyricsQuery {
+                title: Some("Tell Me".to_string()),
+                artist: Some("CAMO".to_string()),
+                spotify_id: Some("spotify123".to_string()),
+                duration_ms: None,
+                backend: Some("deezer".to_string()),
+                debug: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: LyricsPayloadView = parse_response_json(response).await;
+        assert_eq!(payload.provider, "deezer");
+        assert_eq!(payload.track_id, Some(42));
+        assert!(payload.cached);
+        assert_eq!(payload.lrc.as_deref(), Some("[00:01.00]hello"));
+    }
 }
