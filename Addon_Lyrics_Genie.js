@@ -1,8 +1,8 @@
 /**
  * Generated file. Do not edit directly.
  * @addon-type  lyrics
- * @id          bugs-provider
- * @name        Bugs Provider
+ * @id          genie-provider
+ * @name        Genie Provider
  * @version     0.7.0
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
@@ -12,12 +12,12 @@
     'use strict';
 
     const PROVIDER = {
-    "id": "bugs-provider",
-    "name": "Bugs Provider",
-    "backend": "bugs",
+    "id": "genie-provider",
+    "name": "Genie Provider",
+    "backend": "genie",
     "version": "0.7.0",
     "author": "oneulddu",
-    "description": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
+    "description": "Fetches synced lyrics from Genie through the local bridge server.",
     "settingsTitle": "Lyrics bridge server",
     "settingsHint": "Run the local lyrics server and point this addon to it.",
     "icon": "M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z",

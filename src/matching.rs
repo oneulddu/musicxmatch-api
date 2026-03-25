@@ -1,5 +1,6 @@
 use crate::bugs::BugsTrack;
 use crate::deezer::DeezerTrack;
+use crate::genie::GenieTrack;
 use musixmatch_inofficial::models::Track;
 
 pub fn title_variants(title: &str) -> Vec<String> {
@@ -199,6 +200,53 @@ pub fn score_bugs_track(
     score
 }
 
+pub fn score_genie_track(
+    track: &GenieTrack,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> f32 {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let mut score = similarity(&want_title, &track_title) * 70.0
+        + similarity(&want_artist, &track_artist) * 30.0;
+
+    if want_title == track_title {
+        score += 15.0;
+    } else if track_title.contains(&want_title) {
+        score += 8.0;
+    }
+
+    if want_artist == track_artist || track_artist.contains(&want_artist) {
+        score += 10.0;
+    }
+
+    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
+        let actual_duration = actual_ms as f32 / 1000.0;
+        score += duration_score((actual_duration - want_duration).abs());
+    }
+
+    let noise = format!("{track_title} {track_artist}");
+    for word in [
+        "acoustic",
+        "cover",
+        "instrumental",
+        "karaoke",
+        "live",
+        "remix",
+        "tribute",
+    ] {
+        if noise.contains(word) {
+            score -= 18.0;
+        }
+    }
+
+    score
+}
+
 pub fn duration_score(delta_secs: f32) -> f32 {
     if delta_secs <= 1.5 {
         18.0
@@ -282,6 +330,35 @@ pub fn is_acceptable_deezer_match(
 
 pub fn is_acceptable_bugs_match(
     track: &BugsTrack,
+    title: &str,
+    artist: &str,
+    matched_by: &str,
+) -> bool {
+    let want_title = simplify(title);
+    let want_artist = normalize(artist);
+    let track_title = simplify(&track.track_name);
+    let track_artist = normalize(&track.artist_name);
+
+    let title_similarity = similarity(&want_title, &track_title);
+    let artist_similarity = if want_artist.is_empty() {
+        1.0
+    } else {
+        similarity(&want_artist, &track_artist)
+    };
+    let artist_contains = !want_artist.is_empty()
+        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+
+    match matched_by {
+        "search:title" => {
+            title_similarity >= 0.8
+                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+        }
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+    }
+}
+
+pub fn is_acceptable_genie_match(
+    track: &GenieTrack,
     title: &str,
     artist: &str,
     matched_by: &str,

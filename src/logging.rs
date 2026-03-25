@@ -52,6 +52,7 @@ pub fn backend_log_tag(backend: BackendMode) -> &'static str {
         BackendMode::Musicxmatch => "MusicXMatch",
         BackendMode::Deezer => "Deezer",
         BackendMode::Bugs => "Bugs",
+        BackendMode::Genie => "Genie",
     }
 }
 
@@ -60,6 +61,7 @@ pub fn provider_log_tag(provider: &str) -> &'static str {
         "musicxmatch" => "MusicXMatch",
         "deezer" => "Deezer",
         "bugs" => "Bugs",
+        "genie" => "Genie",
         _ => "Server",
     }
 }

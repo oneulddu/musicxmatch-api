@@ -1,5 +1,5 @@
 {
-  "version": "0.6.2",
+  "version": "0.7.0",
   "updated": "2026-03-25",
   "defaultServerUrl": "http://127.0.0.1:8092",
   "defaultTimeoutSec": 15,
@@ -46,6 +46,16 @@
       "backend": "bugs",
       "description": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
       "manifestDescription": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
+      "settingsTitle": "Lyrics bridge server",
+      "settingsHint": "Run the local lyrics server and point this addon to it."
+    },
+    {
+      "file": "Addon_Lyrics_Genie.js",
+      "id": "genie-provider",
+      "name": "Genie Provider",
+      "backend": "genie",
+      "description": "Fetches synced lyrics from Genie through the local bridge server.",
+      "manifestDescription": "Fetches synced lyrics from Genie through the local bridge server.",
       "settingsTitle": "Lyrics bridge server",
       "settingsHint": "Run the local lyrics server and point this addon to it."
     }

@@ -1,0 +1,355 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::time::Duration;
+
+use serde_json::Value;
+
+const SEARCH_URL: &str = "https://www.genie.co.kr/search/searchMain";
+const LYRICS_URL: &str = "https://dn.genie.co.kr/app/purchase/get_msl.asp";
+
+#[derive(Clone)]
+pub struct GenieClient {
+    http: reqwest::Client,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenieTrack {
+    pub track_id: u64,
+    pub track_name: String,
+    pub artist_name: String,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenieLyricsResult {
+    pub track_id: u64,
+    pub track_name: String,
+    pub artist_name: String,
+    pub duration_ms: Option<u64>,
+    pub lrc: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum GenieError {
+    NotFound,
+    NotAvailable,
+    Provider(String),
+}
+
+impl fmt::Display for GenieError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "No matching Genie tracks found."),
+            Self::NotAvailable => write!(f, "No Genie lyrics are available for this track."),
+            Self::Provider(detail) => write!(f, "Genie request failed: {detail}"),
+        }
+    }
+}
+
+impl GenieClient {
+    pub fn new() -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (compatible; ivLyrics-MusicXMatch/1.0)")
+            .build()
+            .expect("failed to construct Genie HTTP client");
+
+        Self { http }
+    }
+
+    pub async fn search_tracks(
+        &self,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> Result<Vec<GenieTrack>, GenieError> {
+        let query = build_search_query(title.unwrap_or(""), artist.unwrap_or(""));
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let response = self
+            .http
+            .get(SEARCH_URL)
+            .query(&[("query", query.as_str())])
+            .send()
+            .await
+            .map_err(|error| GenieError::Provider(error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GenieError::Provider(format!(
+                "search returned {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|error| GenieError::Provider(error.to_string()))?;
+
+        Ok(parse_search_tracks(&body))
+    }
+
+    pub async fn fetch_lyrics_for_track(
+        &self,
+        track: &GenieTrack,
+    ) -> Result<GenieLyricsResult, GenieError> {
+        let response = self
+            .http
+            .get(LYRICS_URL)
+            .query(&[
+                ("path", "a"),
+                ("songid", &track.track_id.to_string()),
+            ])
+            .header(reqwest::header::REFERER, "https://www.genie.co.kr/")
+            .send()
+            .await
+            .map_err(|error| GenieError::Provider(error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GenieError::Provider(format!(
+                "lyrics lookup returned {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|error| GenieError::Provider(error.to_string()))?;
+        let Some(parsed) = parse_lyrics_payload(&body) else {
+            return Err(GenieError::NotAvailable);
+        };
+
+        let lrc = format_genie_lrc(&parsed);
+        let text = format_plain_text(&parsed);
+
+        if lrc.is_none() && text.is_none() {
+            return Err(GenieError::NotAvailable);
+        }
+
+        Ok(GenieLyricsResult {
+            track_id: track.track_id,
+            track_name: track.track_name.clone(),
+            artist_name: track.artist_name.clone(),
+            duration_ms: track.duration_ms,
+            lrc,
+            text,
+        })
+    }
+}
+
+fn build_search_query(title: &str, artist: &str) -> String {
+    [title.trim(), artist.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_search_tracks(body: &str) -> Vec<GenieTrack> {
+    let mut tracks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for row in body.split("<tr class=\"list\"").skip(1) {
+        let row = format!("<tr class=\"list\"{row}");
+        let Some(track_id) = capture_between(&row, "songid=\"", "\"")
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+
+        if !seen.insert(track_id) {
+            continue;
+        }
+
+        let Some(info_block) = capture_between(&row, "<td class=\"info\">", "</td>") else {
+            continue;
+        };
+        let Some(title_block) = capture_anchor_block(info_block, "title ellipsis") else {
+            continue;
+        };
+        let Some(artist_block) = capture_anchor_block(info_block, "artist ellipsis") else {
+            continue;
+        };
+
+        let track_name = html_entity_decode(&cleanup_text(&strip_tags(title_block)));
+        let artist_name = html_entity_decode(&cleanup_text(&strip_tags(artist_block)));
+        if track_name.is_empty() || artist_name.is_empty() {
+            continue;
+        }
+
+        tracks.push(GenieTrack {
+            track_id,
+            track_name,
+            artist_name,
+            duration_ms: None,
+        });
+    }
+
+    tracks
+}
+
+fn parse_lyrics_payload(body: &str) -> Option<BTreeMap<u64, String>> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NOT FOUND LYRICS") {
+        return None;
+    }
+
+    let json = extract_jsonp_payload(trimmed)?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object()?;
+    let mut entries = BTreeMap::new();
+
+    for (key, value) in object {
+        let timestamp_ms = key.parse::<u64>().ok()?;
+        let line = value.as_str()?.trim();
+        if line.is_empty() {
+            continue;
+        }
+        entries.insert(timestamp_ms, html_entity_decode(line));
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+fn format_genie_lrc(entries: &BTreeMap<u64, String>) -> Option<String> {
+    let lines = entries
+        .iter()
+        .map(|(ms, line)| format!("{}{}", format_lrc_timestamp_ms(*ms), line))
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn format_plain_text(entries: &BTreeMap<u64, String>) -> Option<String> {
+    let lines = entries.values().cloned().collect::<Vec<_>>();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn extract_jsonp_payload(body: &str) -> Option<&str> {
+    let start = body.find('(')? + 1;
+    let end = body.rfind(')')?;
+    (start < end).then_some(&body[start..end])
+}
+
+fn capture_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let start_index = haystack.find(start)? + start.len();
+    let remainder = &haystack[start_index..];
+    let end_index = remainder.find(end)?;
+    Some(&remainder[..end_index])
+}
+
+fn capture_anchor_block<'a>(haystack: &'a str, class_name: &str) -> Option<&'a str> {
+    let marker = format!("class=\"{class_name}\"");
+    let class_index = haystack.find(&marker)?;
+    let before = &haystack[..class_index];
+    let anchor_start = before.rfind("<a")?;
+    let anchor = &haystack[anchor_start..];
+    capture_between(anchor, ">", "</a>")
+}
+
+fn strip_tags(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut inside_tag = false;
+
+    for ch in value.chars() {
+        match ch {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => result.push(ch),
+            _ => {}
+        }
+    }
+
+    result
+}
+
+fn cleanup_text(value: &str) -> String {
+    value
+        .replace("TITLE", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn html_entity_decode(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/")
+}
+
+fn format_lrc_timestamp_ms(milliseconds: u64) -> String {
+    let total_centis = (milliseconds + 5) / 10;
+    let minutes = total_centis / 6000;
+    let secs = (total_centis / 100) % 60;
+    let centis = total_centis % 100;
+    format!("[{minutes:02}:{secs:02}.{centis:02}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_genie_jsonp_payload() {
+        let payload = r#"null({"1030":"그대여","7010":"그대여"})"#;
+        let parsed = parse_lyrics_payload(payload).expect("lyrics should parse");
+        assert_eq!(parsed.get(&1030).map(String::as_str), Some("그대여"));
+        assert_eq!(parsed.get(&7010).map(String::as_str), Some("그대여"));
+    }
+
+    #[test]
+    fn format_genie_lrc_uses_millisecond_timestamps() {
+        let mut entries = BTreeMap::new();
+        entries.insert(1030, "그대여".to_string());
+        entries.insert(7010, "오늘은".to_string());
+        let lrc = format_genie_lrc(&entries).expect("lrc should exist");
+        assert!(lrc.contains("[00:01.03]그대여"));
+        assert!(lrc.contains("[00:07.01]오늘은"));
+    }
+
+    #[test]
+    fn parse_search_tracks_extracts_unique_tracks() {
+        let body = r##"
+        <tr class="list" songid="101374441">
+            <td class="info">
+                <a href="#" class="title ellipsis"><span class="icon icon-title">TITLE</span><span class="t_point">How We Came</span> (Feat. pH-1)</a>
+                <a href="#" class="artist ellipsis">Lil Moshpit &amp; Fleeky Bang</a>
+            </td>
+        </tr>
+        <tr class="list" songid="101374441">
+            <td class="info">
+                <a href="#" class="title ellipsis">How We Came (Feat. pH-1)</a>
+                <a href="#" class="artist ellipsis">Lil Moshpit &amp; Fleeky Bang</a>
+            </td>
+        </tr>
+        "##;
+        let tracks = parse_search_tracks(body);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].track_id, 101374441);
+        assert_eq!(tracks[0].track_name, "How We Came (Feat. pH-1)");
+        assert_eq!(tracks[0].artist_name, "Lil Moshpit & Fleeky Bang");
+    }
+}

@@ -1,5 +1,6 @@
 mod bugs;
 mod deezer;
+mod genie;
 mod logging;
 mod matching;
 
@@ -20,14 +21,16 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bugs::{BugsClient, BugsError, BugsTrack};
 use deezer::{DeezerClient, DeezerError, DeezerTrack};
+use genie::{GenieClient, GenieError, GenieTrack};
 use logging::{
     backend_log_tag, bool_text, display_opt_text, display_opt_u64, display_str, provider_log_tag,
     Logger,
 };
 use matching::{
     artist_variants, can_use_title_only_fallback, is_acceptable_bugs_match,
-    is_acceptable_deezer_match, is_acceptable_match, normalize, score_bugs_track,
-    score_deezer_track, score_track, strip_lyrics_footer, title_variants,
+    is_acceptable_deezer_match, is_acceptable_genie_match, is_acceptable_match, normalize,
+    score_bugs_track, score_deezer_track, score_genie_track, score_track, strip_lyrics_footer,
+    title_variants,
 };
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
@@ -40,6 +43,7 @@ const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
 const BUGS_PROVIDER_NAME: &str = "bugs";
+const GENIE_PROVIDER_NAME: &str = "genie";
 const VERSION_INFO_URL: &str =
     "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
 
@@ -48,6 +52,7 @@ struct AppState {
     mxm: Musixmatch,
     deezer: DeezerClient,
     bugs: BugsClient,
+    genie: GenieClient,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     config: Arc<Mutex<AppConfig>>,
     config_path: PathBuf,
@@ -158,6 +163,7 @@ enum LyricsError {
     Musixmatch(MxmError),
     Deezer(DeezerError),
     Bugs(BugsError),
+    Genie(GenieError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +172,7 @@ enum BackendMode {
     Musicxmatch,
     Deezer,
     Bugs,
+    Genie,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +214,7 @@ async fn main() {
         mxm: build_client(),
         deezer: DeezerClient::new(),
         bugs: BugsClient::new(),
+        genie: GenieClient::new(),
         cache: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(Mutex::new(load_config(&config_path))),
         config_path,
@@ -347,7 +355,7 @@ async fn health(State(state): State<AppState>) -> Response {
             status: "ok",
             version: env!("CARGO_PKG_VERSION"),
             provider: PROVIDER_NAME,
-            backend: "musixmatch-inofficial + deezer(optional) + bugs",
+            backend: "musixmatch-inofficial + deezer(optional) + bugs + genie",
             cors: true,
             deezer_configured,
             cache_entries,
@@ -605,6 +613,7 @@ fn parse_backend_mode(value: Option<&str>) -> BackendMode {
         "musicxmatch" | "musixmatch" | "mxm" => BackendMode::Musicxmatch,
         "deezer" => BackendMode::Deezer,
         "bugs" => BackendMode::Bugs,
+        "genie" => BackendMode::Genie,
         _ => BackendMode::Auto,
     }
 }
@@ -871,6 +880,7 @@ fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: Backend
         BackendMode::Musicxmatch => "musicxmatch",
         BackendMode::Deezer => "deezer",
         BackendMode::Bugs => "bugs",
+        BackendMode::Genie => "genie",
     };
     if !spotify_id.is_empty() {
         return format!("{prefix}:spotify:{spotify_id}");
@@ -918,6 +928,15 @@ async fn fetch_payload(
                 .await
                 .map_err(LyricsError::Bugs)
         }
+        BackendMode::Genie => fetch_genie_payload(
+            &state.genie,
+            title,
+            artist,
+            duration_secs,
+            include_debug,
+        )
+        .await
+        .map_err(LyricsError::Genie),
         BackendMode::Auto => match fetch_musixmatch_payload(
             &state.mxm,
             title,
@@ -957,15 +976,34 @@ async fn fetch_payload(
                     }
                 }
 
-                match fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug)
+                let bugs_result =
+                    fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug)
+                        .await;
+                if let Ok(payload) = bugs_result {
+                    return Ok(payload);
+                }
+
+                let bugs_error = bugs_result.err();
+                state.logger.log_tagged(
+                    "Bugs",
+                    "fallback 조회 실패, Genie provider 시도",
+                );
+
+                match fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
                     .await
                 {
                     Ok(payload) => Ok(payload),
                     Err(next_error) => {
                         if let Some(deezer_error) = deezer_error {
                             Err(LyricsError::Deezer(deezer_error))
+                        } else if let Some(bugs_error) = bugs_error {
+                            if matches!(error, MxmError::NotFound | MxmError::NotAvailable) {
+                                Err(LyricsError::Bugs(bugs_error))
+                            } else {
+                                Err(LyricsError::Musixmatch(error))
+                            }
                         } else if matches!(error, MxmError::NotFound | MxmError::NotAvailable) {
-                            Err(LyricsError::Bugs(next_error))
+                            Err(LyricsError::Genie(next_error))
                         } else {
                             Err(LyricsError::Musixmatch(error))
                         }
@@ -1159,6 +1197,44 @@ async fn fetch_bugs_payload(
     Err(BugsError::NotAvailable)
 }
 
+async fn fetch_genie_payload(
+    genie: &GenieClient,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+    include_debug: bool,
+) -> Result<LyricsPayload, GenieError> {
+    let resolution = resolve_genie_tracks(genie, title, artist, duration_secs).await?;
+
+    for track in resolution.tracks {
+        match genie.fetch_lyrics_for_track(&track).await {
+            Ok(payload) => {
+                return Ok(LyricsPayload {
+                    provider: GENIE_PROVIDER_NAME,
+                    track_id: Some(payload.track_id),
+                    track_name: Some(payload.track_name),
+                    artist_name: Some(payload.artist_name),
+                    lrc: payload.lrc,
+                    text: payload.text,
+                    cached: false,
+                    debug: include_debug.then(|| DebugPayload {
+                        source: "genie_search",
+                        matched_by: resolution.matched_by,
+                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
+                        selected_track_id: Some(payload.track_id),
+                        selected_track_duration_ms: payload.duration_ms,
+                        search_variants: resolution.search_variants.clone(),
+                    }),
+                });
+            }
+            Err(GenieError::NotFound | GenieError::NotAvailable) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(GenieError::NotAvailable)
+}
+
 struct TrackResolution {
     track: Track,
     matched_by: &'static str,
@@ -1173,6 +1249,12 @@ struct DeezerTrackResolution {
 
 struct BugsTrackResolution {
     tracks: Vec<BugsTrack>,
+    matched_by: &'static str,
+    search_variants: Vec<String>,
+}
+
+struct GenieTrackResolution {
+    tracks: Vec<GenieTrack>,
     matched_by: &'static str,
     search_variants: Vec<String>,
 }
@@ -1379,6 +1461,64 @@ async fn resolve_bugs_tracks(
     })
 }
 
+async fn resolve_genie_tracks(
+    genie: &GenieClient,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+) -> Result<GenieTrackResolution, GenieError> {
+    let mut tracks_by_id = HashMap::new();
+    let title_variants = title_variants(title);
+    let artist_variants = artist_variants(artist);
+    let mut attempted_variants = Vec::new();
+    let mut matched_by = "search:title+artist";
+
+    for title_variant in &title_variants {
+        for artist_variant in &artist_variants {
+            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
+            let tracks = genie
+                .search_tracks(Some(title_variant), Some(artist_variant))
+                .await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
+        matched_by = "search:title";
+        for title_variant in &title_variants {
+            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
+            let tracks = genie.search_tracks(Some(title_variant), None).await?;
+            for track in tracks {
+                tracks_by_id.entry(track.track_id).or_insert(track);
+            }
+        }
+    }
+
+    if tracks_by_id.is_empty() {
+        return Err(GenieError::NotFound);
+    }
+
+    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        score_genie_track(right, title, artist, duration_secs)
+            .partial_cmp(&score_genie_track(left, title, artist, duration_secs))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.retain(|track| is_acceptable_genie_match(track, title, artist, matched_by));
+
+    if candidates.is_empty() {
+        return Err(GenieError::NotFound);
+    }
+
+    Ok(GenieTrackResolution {
+        tracks: candidates,
+        matched_by,
+        search_variants: attempted_variants,
+    })
+}
+
 async fn search_tracks(
     mxm: &Musixmatch,
     title: Option<&str>,
@@ -1411,6 +1551,16 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
         ),
         LyricsError::Bugs(BugsError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Bugs error: {detail}"))
+        }
+        LyricsError::Genie(GenieError::NotFound) => {
+            (StatusCode::NOT_FOUND, "No tracks found".to_string())
+        }
+        LyricsError::Genie(GenieError::NotAvailable) => (
+            StatusCode::NOT_FOUND,
+            "No lyrics are available for this track".to_string(),
+        ),
+        LyricsError::Genie(GenieError::Provider(detail)) => {
+            (StatusCode::BAD_GATEWAY, format!("Genie error: {detail}"))
         }
         LyricsError::Deezer(DeezerError::ConfigMissing) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1552,6 +1702,7 @@ mod tests {
         );
         assert_eq!(parse_backend_mode(Some("deezer")), BackendMode::Deezer);
         assert_eq!(parse_backend_mode(Some("bugs")), BackendMode::Bugs);
+        assert_eq!(parse_backend_mode(Some("genie")), BackendMode::Genie);
     }
 
     #[test]
@@ -1560,11 +1711,14 @@ mod tests {
         let mxm = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Musicxmatch);
         let deezer = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Deezer);
         let bugs = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Bugs);
+        let genie = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Genie);
         assert_ne!(auto, mxm);
         assert_ne!(mxm, deezer);
         assert_ne!(auto, deezer);
         assert_ne!(deezer, bugs);
         assert_ne!(mxm, bugs);
+        assert_ne!(bugs, genie);
+        assert_ne!(deezer, genie);
     }
 
     #[test]

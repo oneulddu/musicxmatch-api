@@ -6,7 +6,7 @@ echo ""
 
 INSTALL_DIR="$HOME/.ivlyrics-musicxmatch"
 EXTENSIONS_DIR="$HOME/.config/spicetify/Extensions"
-ADDON_NAMES=("Addon_Lyrics_MusicXMatch.js" "Addon_Lyrics_Deezer.js" "Addon_Lyrics_Bugs.js")
+ADDON_NAMES=("Addon_Lyrics_MusicXMatch.js" "Addon_Lyrics_Deezer.js" "Addon_Lyrics_Bugs.js" "Addon_Lyrics_Genie.js")
 SERVICE_LABEL="com.ivlyrics.musicxmatch"
 BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
@@ -136,5 +136,5 @@ fi
 echo ""
 echo "✓ Installation complete!"
 echo "Server running at $SERVER_URL"
-echo "Addon paths: $EXTENSIONS_DIR/${ADDON_NAMES[0]}, $EXTENSIONS_DIR/${ADDON_NAMES[1]}, $EXTENSIONS_DIR/${ADDON_NAMES[2]}"
+echo "Addon paths: $EXTENSIONS_DIR/${ADDON_NAMES[0]}, $EXTENSIONS_DIR/${ADDON_NAMES[1]}, $EXTENSIONS_DIR/${ADDON_NAMES[2]}, $EXTENSIONS_DIR/${ADDON_NAMES[3]}"
 echo ""
