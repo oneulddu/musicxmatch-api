@@ -1,34 +1,58 @@
 /**
+ * Generated file. Do not edit directly.
  * @addon-type  lyrics
  * @id          deezer-provider
  * @name        Deezer Provider
-  * @version     0.6.1
+ * @version     0.6.2
  * @author      oneulddu
+ * @generated   scripts/generate_addons.js
  */
 
 (() => {
     'use strict';
 
-    const ADDON_ID = 'deezer-provider';
-    const BACKEND = 'deezer';
-    const DEFAULT_SERVER_URL = 'http://127.0.0.1:8092';
+    const PROVIDER = {
+    "id": "deezer-provider",
+    "name": "Deezer Provider",
+    "backend": "deezer",
+    "version": "0.6.2",
+    "author": "oneulddu",
+    "description": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
+    "settingsTitle": "Lyrics bridge server",
+    "settingsHint": "Run the local lyrics server and point this addon to it.",
+    "icon": "M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z",
+    "supports": {
+        "karaoke": false,
+        "synced": true,
+        "unsynced": true
+    }
+};
+    const SERVER_CONFIG = {
+    "kind": "deezerArl",
+    "title": "Deezer cookie",
+    "placeholder": "Paste Deezer arl cookie",
+    "hint": "Required for Deezer provider. Paste your Deezer arl cookie so the local server can authenticate.",
+    "saveLabel": "Save Deezer cookie",
+    "configuredLabel": "Configured",
+    "savedLabel": "Saved",
+    "clearedLabel": "Cleared",
+    "previewLabel": "Saved cookie",
+    "errorPrefix": "Deezer config check failed"
+};
+    const DEFAULT_SERVER_URL = "http://127.0.0.1:8092";
     const DEFAULT_TIMEOUT_SEC = 15;
 
     const ADDON_INFO = {
-        id: ADDON_ID,
-        name: 'Deezer Provider',
-        author: 'oneulddu',
-        version: '0.6.1',
+        id: PROVIDER.id,
+        name: PROVIDER.name,
+        author: PROVIDER.author,
+        version: PROVIDER.version,
         description: {
-            en: 'Fetches synced or plain lyrics from Deezer through the local bridge server.',
+            en: PROVIDER.description,
         },
-        supports: {
-            karaoke: false,
-            synced: true,
-            unsynced: true,
-        },
+        supports: PROVIDER.supports,
         useIvLyricsSync: true,
-        icon: 'M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z',
+        icon: PROVIDER.icon,
     };
 
     const SETTING = {
@@ -37,11 +61,11 @@
     };
 
     function getSetting(key, defaultValue) {
-        return window.LyricsAddonManager?.getAddonSetting(ADDON_ID, key, defaultValue) ?? defaultValue;
+        return window.LyricsAddonManager?.getAddonSetting(PROVIDER.id, key, defaultValue) ?? defaultValue;
     }
 
     function setSetting(key, value) {
-        window.LyricsAddonManager?.setAddonSetting(ADDON_ID, key, value);
+        window.LyricsAddonManager?.setAddonSetting(PROVIDER.id, key, value);
     }
 
     function normalizeServerUrl(value) {
@@ -49,8 +73,7 @@
     }
 
     function getServerUrl() {
-        const value = getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL);
-        return normalizeServerUrl(value);
+        return normalizeServerUrl(getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL));
     }
 
     function getServerCandidates(serverUrl) {
@@ -64,7 +87,7 @@
                 candidates.push(parsed.toString().replace(/\/$/, ''));
             }
         } catch {
-            // Ignore invalid URLs here and let fetch surface the error later.
+            // Let fetch surface invalid URLs.
         }
 
         return [...new Set(candidates)];
@@ -161,6 +184,17 @@
         return 0;
     }
 
+    async function parseErrorResponse(response) {
+        let detail = `HTTP ${response.status}`;
+        try {
+            const payload = await response.json();
+            detail = payload.detail || detail;
+        } catch {
+            // Keep generic status text.
+        }
+        return detail;
+    }
+
     async function fetchVersionStatus(serverUrl) {
         const versionState = {
             latestAddonVersion: null,
@@ -190,27 +224,33 @@
             }
         } catch (error) {
             versionState.error = error.message;
-            return versionState;
         }
 
         return versionState;
     }
 
     async function fetchServerConfig(serverUrl) {
+        if (!SERVER_CONFIG) {
+            return null;
+        }
+
         const configState = {
-            deezerArlConfigured: false,
-            deezerArlPreview: null,
+            configured: false,
+            preview: null,
             error: null,
         };
 
         try {
             const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/config', 5000);
-            if (response.ok) {
-                const payload = await response.json();
-                configState.deezerArlConfigured = !!payload.deezerArlConfigured;
-                configState.deezerArlPreview = payload.deezerArlPreview || null;
-            } else {
+            if (!response.ok) {
                 configState.error = `HTTP ${response.status}`;
+                return configState;
+            }
+
+            const payload = await response.json();
+            if (SERVER_CONFIG.kind === 'deezerArl') {
+                configState.configured = !!payload.deezerArlConfigured;
+                configState.preview = payload.deezerArlPreview || null;
             }
         } catch (error) {
             configState.error = error.message;
@@ -219,7 +259,16 @@
         return configState;
     }
 
-    async function saveServerConfig(serverUrl, payload) {
+    async function saveServerConfig(serverUrl, rawValue) {
+        if (!SERVER_CONFIG) {
+            return null;
+        }
+
+        const payload = {};
+        if (SERVER_CONFIG.kind === 'deezerArl') {
+            payload.deezerArl = rawValue.trim() || '';
+        }
+
         const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/config', 10000, {
             method: 'POST',
             headers: {
@@ -229,14 +278,7 @@
         });
 
         if (!response.ok) {
-            let detail = `HTTP ${response.status}`;
-            try {
-                const body = await response.json();
-                detail = body.detail || detail;
-            } catch {
-                // Ignore parse errors and keep generic status text.
-            }
-            throw new Error(detail);
+            throw new Error(await parseErrorResponse(response));
         }
 
         return response.json();
@@ -246,16 +288,16 @@
         const React = Spicetify.React;
         const { useEffect, useState } = React;
 
-        return function DeezerSettings() {
+        return function ProviderSettings() {
             const [serverUrl, setServerUrl] = useState(() => getSetting(SETTING.SERVER_URL, DEFAULT_SERVER_URL));
             const [timeoutSec, setTimeoutSec] = useState(() => getSetting(SETTING.TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC));
             const [status, setStatus] = useState(null);
             const [versionStatus, setVersionStatus] = useState(null);
             const [updateStatus, setUpdateStatus] = useState(null);
             const [updateAllStatus, setUpdateAllStatus] = useState(null);
-            const [deezerArl, setDeezerArl] = useState('');
-            const [deezerConfig, setDeezerConfig] = useState(null);
-            const [deezerStatus, setDeezerStatus] = useState(null);
+            const [serverConfigValue, setServerConfigValue] = useState('');
+            const [serverConfigState, setServerConfigState] = useState(null);
+            const [serverConfigStatus, setServerConfigStatus] = useState(null);
 
             const saveUrl = (value) => {
                 setServerUrl(value);
@@ -305,38 +347,43 @@
                 }
             };
 
-            const saveDeezerArl = async (value) => {
-                setDeezerStatus('saving');
+            const saveAdditionalConfig = async (value) => {
+                if (!SERVER_CONFIG) {
+                    return;
+                }
+                setServerConfigStatus('saving');
                 try {
-                    const payload = await saveServerConfig(serverUrl || DEFAULT_SERVER_URL, {
-                        deezerArl: value.trim() || '',
-                    });
-                    setDeezerConfig({
-                        deezerArlConfigured: !!payload.deezerArlConfigured,
-                        deezerArlPreview: payload.deezerArlPreview || null,
-                        error: null,
-                    });
-                    setDeezerArl('');
-                    setDeezerStatus(value.trim() ? 'saved' : 'cleared');
+                    const payload = await saveServerConfig(serverUrl || DEFAULT_SERVER_URL, value);
+                    if (SERVER_CONFIG.kind === 'deezerArl') {
+                        setServerConfigState({
+                            configured: !!payload.deezerArlConfigured,
+                            preview: payload.deezerArlPreview || null,
+                            error: null,
+                        });
+                    }
+                    setServerConfigValue('');
+                    setServerConfigStatus(value.trim() ? 'saved' : 'cleared');
                 } catch (error) {
-                    setDeezerStatus(`failed:${error.message}`);
+                    setServerConfigStatus(`failed:${error.message}`);
                 }
             };
 
             useEffect(() => {
                 let cancelled = false;
 
-                fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((result) => {
+                fetchVersionStatus(serverUrl || DEFAULT_SERVER_URL).then((nextStatus) => {
                     if (!cancelled) {
-                        setVersionStatus(result);
+                        setVersionStatus(nextStatus);
                     }
                 });
 
-                fetchServerConfig(serverUrl || DEFAULT_SERVER_URL).then((result) => {
-                    if (!cancelled) {
-                        setDeezerConfig(result);
-                    }
-                });
+                if (SERVER_CONFIG) {
+                    fetchServerConfig(serverUrl || DEFAULT_SERVER_URL).then((nextState) => {
+                        if (!cancelled) {
+                            setServerConfigState(nextState);
+                        }
+                    });
+                }
 
                 return () => {
                     cancelled = true;
@@ -367,6 +414,11 @@
                 color: '#000',
                 fontWeight: 700,
             };
+            const subtleButton = {
+                ...button,
+                background: 'rgba(255,255,255,0.16)',
+                color: '#fff',
+            };
             const commandBox = {
                 marginTop: 14,
                 padding: '10px 12px',
@@ -381,7 +433,7 @@
             const updateNeeded = !!(versionStatus && (versionStatus.addonOutdated || versionStatus.serverOutdated));
 
             return React.createElement('div', { style: box },
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Lyrics bridge server'),
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 8 } }, PROVIDER.settingsTitle),
                 React.createElement('input', {
                     type: 'text',
                     value: serverUrl,
@@ -389,7 +441,7 @@
                     placeholder: DEFAULT_SERVER_URL,
                     onChange: (event) => saveUrl(event.target.value),
                 }),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, 'Run the local lyrics server and point this addon to it.'),
+                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, PROVIDER.settingsHint),
                 React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, `Timeout: ${timeoutSec}s`),
                 React.createElement('input', {
                     type: 'range',
@@ -409,41 +461,41 @@
                     status === 'ok' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Connected'),
                     status === 'fail' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed')
                 ),
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 18, marginBottom: 8 } }, 'Deezer cookie'),
-                React.createElement('input', {
-                    type: 'password',
-                    value: deezerArl,
-                    style: input,
-                    placeholder: 'Paste Deezer arl cookie',
-                    onChange: (event) => {
-                        setDeezerArl(event.target.value);
-                        setDeezerStatus(null);
-                    },
-                }),
-                React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
-                    'Required for Deezer provider. Paste your Deezer arl cookie so the local server can authenticate.'
-                ),
-                React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
-                    React.createElement('button', {
-                        style: button,
-                        onClick: () => saveDeezerArl(deezerArl),
-                        disabled: deezerStatus === 'saving',
-                    }, deezerStatus === 'saving' ? 'Saving...' : 'Save Deezer cookie'),
-                    React.createElement('button', {
-                        style: { ...button, background: 'rgba(255,255,255,0.16)', color: '#fff' },
-                        onClick: () => saveDeezerArl(''),
-                        disabled: deezerStatus === 'saving',
-                    }, 'Clear'),
-                    deezerConfig?.deezerArlConfigured && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Configured'),
-                    deezerStatus === 'saved' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Saved'),
-                    deezerStatus === 'cleared' && React.createElement('span', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700 } }, 'Cleared'),
-                    deezerStatus?.startsWith('failed:') && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Save failed')
-                ),
-                deezerConfig?.deezerArlPreview && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
-                    `Saved cookie: ${deezerConfig.deezerArlPreview}`
-                ),
-                deezerConfig?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 8 } },
-                    `Deezer config check failed: ${deezerConfig.error}`
+                SERVER_CONFIG && React.createElement(React.Fragment, null,
+                    React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 18, marginBottom: 8 } }, SERVER_CONFIG.title),
+                    React.createElement('input', {
+                        type: 'password',
+                        value: serverConfigValue,
+                        style: input,
+                        placeholder: SERVER_CONFIG.placeholder,
+                        onChange: (event) => {
+                            setServerConfigValue(event.target.value);
+                            setServerConfigStatus(null);
+                        },
+                    }),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, SERVER_CONFIG.hint),
+                    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
+                        React.createElement('button', {
+                            style: button,
+                            onClick: () => saveAdditionalConfig(serverConfigValue),
+                            disabled: serverConfigStatus === 'saving',
+                        }, serverConfigStatus === 'saving' ? 'Saving...' : SERVER_CONFIG.saveLabel),
+                        React.createElement('button', {
+                            style: subtleButton,
+                            onClick: () => saveAdditionalConfig(''),
+                            disabled: serverConfigStatus === 'saving',
+                        }, 'Clear'),
+                        serverConfigState?.configured && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, SERVER_CONFIG.configuredLabel),
+                        serverConfigStatus === 'saved' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, SERVER_CONFIG.savedLabel),
+                        serverConfigStatus === 'cleared' && React.createElement('span', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700 } }, SERVER_CONFIG.clearedLabel),
+                        serverConfigStatus?.startsWith('failed:') && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Save failed')
+                    ),
+                    serverConfigState?.preview && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
+                        `${SERVER_CONFIG.previewLabel}: ${serverConfigState.preview}`
+                    ),
+                    serverConfigState?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 8 } },
+                        `${SERVER_CONFIG.errorPrefix}: ${serverConfigState.error}`
+                    )
                 ),
                 React.createElement('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 14 } },
                     `Addon: ${ADDON_INFO.version}`,
@@ -487,7 +539,7 @@
     async function getLyrics(info) {
         const result = {
             uri: info.uri,
-            provider: ADDON_ID,
+            provider: PROVIDER.id,
             karaoke: null,
             synced: null,
             unsynced: null,
@@ -508,7 +560,7 @@
             ? info.uri.split(':')[2]
             : '';
         const params = new URLSearchParams({ title, artist });
-        params.set('backend', BACKEND);
+        params.set('backend', PROVIDER.backend);
         if (spotifyId) {
             params.set('spotifyId', spotifyId);
         }
@@ -529,12 +581,7 @@
         }
 
         if (!response.ok) {
-            try {
-                const payload = await response.json();
-                result.error = payload.detail || `HTTP ${response.status}`;
-            } catch {
-                result.error = `HTTP ${response.status}`;
-            }
+            result.error = await parseErrorResponse(response);
             return result;
         }
 
@@ -561,10 +608,10 @@
         return result;
     }
 
-    const DeezerAddon = {
+    const addon = {
         ...ADDON_INFO,
         async init() {
-            window.__ivLyricsDebugLog?.(`[${ADDON_ID}] initialized`);
+            window.__ivLyricsDebugLog?.(`[${PROVIDER.id}] initialized`);
         },
         getSettingsUI,
         getLyrics,
@@ -572,7 +619,7 @@
 
     const register = () => {
         if (window.LyricsAddonManager) {
-            window.LyricsAddonManager.register(DeezerAddon);
+            window.LyricsAddonManager.register(addon);
             return;
         }
         setTimeout(register, 100);

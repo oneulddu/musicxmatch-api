@@ -1,0 +1,53 @@
+{
+  "version": "0.6.2",
+  "updated": "2026-03-25",
+  "defaultServerUrl": "http://127.0.0.1:8092",
+  "defaultTimeoutSec": 15,
+  "rawBaseUrl": "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main",
+  "githubUrl": "https://github.com/oneulddu/musicxmatch-api",
+  "minAppVersion": "3.1.0",
+  "providers": [
+    {
+      "file": "Addon_Lyrics_MusicXMatch.js",
+      "id": "musicxmatch-provider",
+      "name": "MusicXMatch Provider",
+      "backend": "musicxmatch",
+      "description": "Fetches synced or plain lyrics from MusicXMatch through the local bridge server.",
+      "manifestDescription": "Fetches synced or plain lyrics from a local MusicXMatch bridge server.",
+      "settingsTitle": "MusicXMatch server",
+      "settingsHint": "Run the local lyrics server and point this addon to it."
+    },
+    {
+      "file": "Addon_Lyrics_Deezer.js",
+      "id": "deezer-provider",
+      "name": "Deezer Provider",
+      "backend": "deezer",
+      "description": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
+      "manifestDescription": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
+      "settingsTitle": "Lyrics bridge server",
+      "settingsHint": "Run the local lyrics server and point this addon to it.",
+      "serverConfig": {
+        "kind": "deezerArl",
+        "title": "Deezer cookie",
+        "placeholder": "Paste Deezer arl cookie",
+        "hint": "Required for Deezer provider. Paste your Deezer arl cookie so the local server can authenticate.",
+        "saveLabel": "Save Deezer cookie",
+        "configuredLabel": "Configured",
+        "savedLabel": "Saved",
+        "clearedLabel": "Cleared",
+        "previewLabel": "Saved cookie",
+        "errorPrefix": "Deezer config check failed"
+      }
+    },
+    {
+      "file": "Addon_Lyrics_Bugs.js",
+      "id": "bugs-provider",
+      "name": "Bugs Provider",
+      "backend": "bugs",
+      "description": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
+      "manifestDescription": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
+      "settingsTitle": "Lyrics bridge server",
+      "settingsHint": "Run the local lyrics server and point this addon to it."
+    }
+  ]
+}

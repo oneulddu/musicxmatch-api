@@ -1,9 +1,10 @@
 mod bugs;
 mod deezer;
+mod logging;
+mod matching;
 
 use std::collections::HashMap;
-use std::fs::{create_dir_all, OpenOptions};
-use std::io::Write;
+use std::fs::create_dir_all;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,6 +20,15 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bugs::{BugsClient, BugsError, BugsTrack};
 use deezer::{DeezerClient, DeezerError, DeezerTrack};
+use logging::{
+    backend_log_tag, bool_text, display_opt_text, display_opt_u64, display_str, provider_log_tag,
+    Logger,
+};
+use matching::{
+    artist_variants, can_use_title_only_fallback, is_acceptable_bugs_match,
+    is_acceptable_deezer_match, is_acceptable_match, normalize, score_bugs_track,
+    score_deezer_track, score_track, strip_lyrics_footer, title_variants,
+};
 use musixmatch_inofficial::models::{SortOrder, SubtitleFormat, Track, TrackId};
 use musixmatch_inofficial::{Error as MxmError, Musixmatch};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -182,11 +192,6 @@ struct UpdateApplyPayload {
     command: Vec<String>,
 }
 
-#[derive(Clone)]
-struct Logger {
-    file: Arc<std::sync::Mutex<Option<std::fs::File>>>,
-}
-
 #[tokio::main]
 async fn main() {
     let logger = Logger::new(log_file_path());
@@ -307,90 +312,6 @@ fn save_config_file(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
 
     let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
     std::fs::write(path, bytes).map_err(|error| error.to_string())
-}
-
-impl Logger {
-    fn new(path: PathBuf) -> Self {
-        if let Some(parent) = path.parent() {
-            let _ = create_dir_all(parent);
-        }
-
-        let file = OpenOptions::new().create(true).append(true).open(path).ok();
-        Self {
-            file: Arc::new(std::sync::Mutex::new(file)),
-        }
-    }
-
-    fn log_tagged(&self, tag: &str, message: &str) {
-        self.write_line(&format!("[{tag}] {message}"));
-    }
-
-    fn write_line(&self, message: &str) {
-        let line = format!("[{}] {message}\n", timestamp_string());
-        print!("{line}");
-        if let Ok(mut guard) = self.file.lock() {
-            if let Some(file) = guard.as_mut() {
-                let _ = file.write_all(line.as_bytes());
-                let _ = file.flush();
-            }
-        }
-    }
-}
-
-fn timestamp_string() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs().to_string(),
-        Err(_) => "0".to_string(),
-    }
-}
-
-fn backend_log_tag(backend: BackendMode) -> &'static str {
-    match backend {
-        BackendMode::Auto => "Auto",
-        BackendMode::Musicxmatch => "MusicXMatch",
-        BackendMode::Deezer => "Deezer",
-        BackendMode::Bugs => "Bugs",
-    }
-}
-
-fn provider_log_tag(provider: &str) -> &'static str {
-    match provider {
-        PROVIDER_NAME => "MusicXMatch",
-        DEEZER_PROVIDER_NAME => "Deezer",
-        BUGS_PROVIDER_NAME => "Bugs",
-        _ => "Server",
-    }
-}
-
-fn display_str(value: &str) -> &str {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        "-"
-    } else {
-        trimmed
-    }
-}
-
-fn display_opt_text(value: Option<&str>) -> &str {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => value,
-        None => "-",
-    }
-}
-
-fn display_opt_u64(value: Option<u64>) -> String {
-    value
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn bool_text(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
-    }
 }
 
 fn deserialize_boolish_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -797,6 +718,46 @@ fn mask_secret(value: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
+const ADDON_FILES: [&str; 3] = [
+    "Addon_Lyrics_MusicXMatch.js",
+    "Addon_Lyrics_Deezer.js",
+    "Addon_Lyrics_Bugs.js",
+];
+
+const RAW_REPO_BASE_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main";
+
+fn addon_download_url(file_name: &str) -> String {
+    format!("{RAW_REPO_BASE_URL}/{file_name}")
+}
+
+#[cfg(target_os = "windows")]
+fn addon_download_command_lines() -> Vec<String> {
+    ADDON_FILES
+        .iter()
+        .map(|file_name| {
+            format!(
+                "Invoke-WebRequest -Uri \"{}\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\{}\"",
+                addon_download_url(file_name),
+                file_name
+            )
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn addon_download_command_lines() -> Vec<String> {
+    ADDON_FILES
+        .iter()
+        .map(|file_name| {
+            format!(
+                "curl -fsSL {} -o ~/.config/spicetify/Extensions/{}",
+                addon_download_url(file_name),
+                file_name
+            )
+        })
+        .collect()
+}
+
 fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
@@ -815,23 +776,17 @@ fn update_server_command_lines() -> Vec<String> {
 fn update_all_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        vec![
-            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
-            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"".to_string(),
-            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"".to_string(),
-            "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Bugs.js\"".to_string(),
-            "spicetify apply".to_string(),
-        ]
+        let mut commands = update_server_command_lines();
+        commands.extend(addon_download_command_lines());
+        commands.push("spicetify apply".to_string());
+        commands
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec![
-            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
-            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js".to_string(),
-            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js".to_string(),
-            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js".to_string(),
-            "spicetify apply".to_string(),
-        ]
+        let mut commands = update_server_command_lines();
+        commands.extend(addon_download_command_lines());
+        commands.push("spicetify apply".to_string());
+        commands
     }
 }
 
@@ -839,9 +794,10 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let addon_steps = if include_addon {
-            "; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_MusicXMatch.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Deezer.js\"; Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\Addon_Lyrics_Bugs.js\"; spicetify apply"
+            let steps = addon_download_command_lines().join("; ");
+            format!("; {steps}; spicetify apply")
         } else {
-            ""
+            String::new()
         };
         let command = format!(
             "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex{}'",
@@ -868,9 +824,10 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
             let _ = create_dir_all(parent);
         }
         let addon_steps = if include_addon {
-            "; mkdir -p ~/.config/spicetify/Extensions; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_MusicXMatch.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Deezer.js; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js -o ~/.config/spicetify/Extensions/Addon_Lyrics_Bugs.js; spicetify apply"
+            let steps = addon_download_command_lines().join("; ");
+            format!("; mkdir -p ~/.config/spicetify/Extensions; {steps}; spicetify apply")
         } else {
-            ""
+            String::new()
         };
         let command = format!(
             "sleep 1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash{}",
@@ -1451,400 +1408,6 @@ async fn search_tracks(
         .await
 }
 
-fn score_deezer_track(
-    track: &DeezerTrack,
-    title: &str,
-    artist: &str,
-    duration_secs: Option<f32>,
-) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
-
-    if want_title == track_title {
-        score += 15.0;
-    } else if track_title.contains(&want_title) {
-        score += 8.0;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
-    }
-
-    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
-        let actual_duration = actual_ms as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
-
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= 18.0;
-        }
-    }
-
-    score
-}
-
-fn score_bugs_track(
-    track: &BugsTrack,
-    title: &str,
-    artist: &str,
-    duration_secs: Option<f32>,
-) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
-
-    if want_title == track_title {
-        score += 15.0;
-    } else if track_title.contains(&want_title) {
-        score += 8.0;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
-    }
-
-    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
-        let actual_duration = actual_ms as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
-
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= 18.0;
-        }
-    }
-
-    score
-}
-
-fn is_acceptable_deezer_match(
-    track: &DeezerTrack,
-    title: &str,
-    artist: &str,
-    matched_by: &str,
-) -> bool {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let title_similarity = similarity(&want_title, &track_title);
-    let artist_similarity = if want_artist.is_empty() {
-        1.0
-    } else {
-        similarity(&want_artist, &track_artist)
-    };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-
-    match matched_by {
-        "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
-        }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
-    }
-}
-
-fn is_acceptable_bugs_match(
-    track: &BugsTrack,
-    title: &str,
-    artist: &str,
-    matched_by: &str,
-) -> bool {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let title_similarity = similarity(&want_title, &track_title);
-    let artist_similarity = if want_artist.is_empty() {
-        1.0
-    } else {
-        similarity(&want_artist, &track_artist)
-    };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-
-    match matched_by {
-        "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
-        }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
-    }
-}
-
-fn title_variants(title: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let base = title.trim();
-    push_variant(&mut values, base);
-    push_variant(&mut values, &strip_brackets(base));
-    push_variant(&mut values, &strip_featured(base));
-    push_variant(&mut values, &collapse_to_words(base));
-    push_variant(&mut values, &collapse_alnum(base));
-    push_variant(&mut values, &normalize_connectors(base));
-    values
-}
-
-fn artist_variants(artist: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let base = artist.trim();
-    push_variant(&mut values, base);
-    push_variant(&mut values, &first_artist(base));
-    push_variant(&mut values, &strip_featured(base));
-    push_variant(&mut values, &collapse_to_words(base));
-    push_variant(&mut values, &normalize_connectors(base));
-    values
-}
-
-fn push_variant(values: &mut Vec<String>, candidate: &str) {
-    let trimmed = candidate.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    if !values
-        .iter()
-        .any(|value| value.eq_ignore_ascii_case(trimmed))
-    {
-        values.push(trimmed.to_string());
-    }
-}
-
-fn strip_brackets(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut depth_round = 0usize;
-    let mut depth_square = 0usize;
-
-    for ch in value.chars() {
-        match ch {
-            '(' => depth_round += 1,
-            ')' => depth_round = depth_round.saturating_sub(1),
-            '[' => depth_square += 1,
-            ']' => depth_square = depth_square.saturating_sub(1),
-            _ if depth_round == 0 && depth_square == 0 => result.push(ch),
-            _ => {}
-        }
-    }
-
-    collapse_to_words(&result)
-}
-
-fn strip_featured(value: &str) -> String {
-    let lower = value.to_lowercase();
-    for marker in [" feat. ", " feat ", " featuring ", " ft. ", " ft "] {
-        if let Some(index) = lower.find(marker) {
-            return value[..index].trim().to_string();
-        }
-    }
-    value.trim().to_string()
-}
-
-fn first_artist(value: &str) -> String {
-    for marker in [",", "&", " x ", ";"] {
-        if let Some(index) = value.find(marker) {
-            return value[..index].trim().to_string();
-        }
-    }
-    value.trim().to_string()
-}
-
-fn collapse_to_words(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn collapse_alnum(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .collect::<String>()
-}
-
-fn normalize_connectors(value: &str) -> String {
-    value
-        .replace('&', " and ")
-        .replace('×', " x ")
-        .replace('/', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn normalize(value: &str) -> String {
-    collapse_to_words(value).to_lowercase()
-}
-
-fn simplify(value: &str) -> String {
-    let no_brackets = strip_brackets(value);
-    let base = no_brackets
-        .split(" - ")
-        .next()
-        .unwrap_or(no_brackets.as_str())
-        .trim()
-        .to_string();
-    normalize(&base)
-}
-
-fn similarity(a: &str, b: &str) -> f32 {
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    let len = a.chars().count().max(b.chars().count()) as f32;
-    let matches = a
-        .chars()
-        .zip(b.chars())
-        .filter(|(left, right)| left == right)
-        .count() as f32;
-    matches / len
-}
-
-fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Option<f32>) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * 70.0
-        + similarity(&want_artist, &track_artist) * 30.0;
-
-    if want_title == track_title {
-        score += 15.0;
-    } else if track_title.contains(&want_title) {
-        score += 8.0;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += 10.0;
-    }
-
-    if let Some(want_duration) = duration_secs {
-        let actual_duration = track.track_length as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
-
-    if track.has_subtitles {
-        score += 8.0;
-    }
-    if track.has_richsync {
-        score += 4.0;
-    }
-    if track.has_lyrics {
-        score += 2.0;
-    }
-
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= 18.0;
-        }
-    }
-
-    score
-}
-
-fn duration_score(delta_secs: f32) -> f32 {
-    if delta_secs <= 1.5 {
-        18.0
-    } else if delta_secs <= 3.0 {
-        10.0
-    } else if delta_secs <= 6.0 {
-        4.0
-    } else if delta_secs >= 20.0 {
-        -20.0
-    } else if delta_secs >= 10.0 {
-        -8.0
-    } else {
-        0.0
-    }
-}
-
-fn can_use_title_only_fallback(title: &str) -> bool {
-    let simplified = simplify(title);
-    let compact_len = simplified.chars().filter(|ch| !ch.is_whitespace()).count();
-    let has_non_ascii = simplified.chars().any(|ch| !ch.is_ascii());
-    let word_count = simplified.split_whitespace().count();
-    compact_len >= 4 || word_count >= 2 || (has_non_ascii && compact_len >= 3)
-}
-
-fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by: &str) -> bool {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let title_similarity = similarity(&want_title, &track_title);
-    let artist_similarity = if want_artist.is_empty() {
-        1.0
-    } else {
-        similarity(&want_artist, &track_artist)
-    };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-
-    match matched_by {
-        "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
-        }
-        "search:artist" => artist_similarity >= 0.5 && title_similarity >= 0.3,
-        "matcher:original" | "matcher:variants" => {
-            title_similarity >= 0.45 || artist_similarity >= 0.45
-        }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
-    }
-}
-
-fn strip_lyrics_footer(value: &str) -> String {
-    value
-        .split("\n\n*******")
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .to_string()
-}
-
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
         LyricsError::Bugs(BugsError::NotFound) => {
@@ -1909,6 +1472,9 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matching::{
+        collapse_to_words, duration_score, normalize_connectors, similarity, simplify,
+    };
 
     #[test]
     fn collapse_to_words_preserves_unicode_letters() {

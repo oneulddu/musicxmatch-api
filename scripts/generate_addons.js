@@ -1,9 +1,40 @@
-/**
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+
+const rootDir = path.resolve(__dirname, '..');
+const definitionsPath = path.join(__dirname, 'addon_definitions.json');
+const definitions = JSON.parse(fs.readFileSync(definitionsPath, 'utf8'));
+
+function js(value) {
+    return JSON.stringify(value, null, 4);
+}
+
+function buildAddon(provider) {
+    const providerConfig = {
+        id: provider.id,
+        name: provider.name,
+        backend: provider.backend,
+        version: definitions.version,
+        author: 'oneulddu',
+        description: provider.description,
+        settingsTitle: provider.settingsTitle,
+        settingsHint: provider.settingsHint,
+        icon: 'M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z',
+        supports: {
+            karaoke: false,
+            synced: true,
+            unsynced: true,
+        },
+    };
+
+    return `/**
  * Generated file. Do not edit directly.
  * @addon-type  lyrics
- * @id          musicxmatch-provider
- * @name        MusicXMatch Provider
- * @version     0.6.2
+ * @id          ${provider.id}
+ * @name        ${provider.name}
+ * @version     ${definitions.version}
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -11,25 +42,10 @@
 (() => {
     'use strict';
 
-    const PROVIDER = {
-    "id": "musicxmatch-provider",
-    "name": "MusicXMatch Provider",
-    "backend": "musicxmatch",
-    "version": "0.6.2",
-    "author": "oneulddu",
-    "description": "Fetches synced or plain lyrics from MusicXMatch through the local bridge server.",
-    "settingsTitle": "MusicXMatch server",
-    "settingsHint": "Run the local lyrics server and point this addon to it.",
-    "icon": "M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z",
-    "supports": {
-        "karaoke": false,
-        "synced": true,
-        "unsynced": true
-    }
-};
-    const SERVER_CONFIG = null;
-    const DEFAULT_SERVER_URL = "http://127.0.0.1:8092";
-    const DEFAULT_TIMEOUT_SEC = 15;
+    const PROVIDER = ${js(providerConfig)};
+    const SERVER_CONFIG = ${js(provider.serverConfig || null)};
+    const DEFAULT_SERVER_URL = ${JSON.stringify(definitions.defaultServerUrl)};
+    const DEFAULT_TIMEOUT_SEC = ${definitions.defaultTimeoutSec};
 
     const ADDON_INFO = {
         id: PROVIDER.id,
@@ -58,7 +74,7 @@
     }
 
     function normalizeServerUrl(value) {
-        return (value || DEFAULT_SERVER_URL).replace(/\/$/, '');
+        return (value || DEFAULT_SERVER_URL).replace(/\\/$/, '');
     }
 
     function getServerUrl() {
@@ -73,7 +89,7 @@
             const parsed = new URL(normalized);
             if (parsed.hostname === 'localhost') {
                 parsed.hostname = '127.0.0.1';
-                candidates.push(parsed.toString().replace(/\/$/, ''));
+                candidates.push(parsed.toString().replace(/\\/$/, ''));
             }
         } catch {
             // Let fetch surface invalid URLs.
@@ -88,7 +104,7 @@
 
         for (const baseUrl of candidates) {
             try {
-                const response = await fetch(`${baseUrl}${path}`, {
+                const response = await fetch(\`\${baseUrl}\${path}\`, {
                     ...init,
                     signal: AbortSignal.timeout(timeoutMs),
                 });
@@ -113,8 +129,8 @@
 
         const synced = [];
         const unsynced = [];
-        for (const line of lrc.split('\n')) {
-            const match = line.match(/\[(\d+):(\d+)(?:[.,](\d+))?\](.*)/);
+        for (const line of lrc.split('\\n')) {
+            const match = line.match(/\\[(\\d+):(\\d+)(?:[.,](\\d+))?\\](.*)/);
             if (!match) {
                 continue;
             }
@@ -146,7 +162,7 @@
         }
 
         const lines = text
-            .split('\n')
+            .split('\\n')
             .map((line) => line.trim())
             .filter(Boolean)
             .map((line) => ({ text: line }));
@@ -174,7 +190,7 @@
     }
 
     async function parseErrorResponse(response) {
-        let detail = `HTTP ${response.status}`;
+        let detail = \`HTTP \${response.status}\`;
         try {
             const payload = await response.json();
             detail = payload.detail || detail;
@@ -232,7 +248,7 @@
         try {
             const { response } = await fetchJsonWithFallback(serverUrl || DEFAULT_SERVER_URL, '/config', 5000);
             if (!response.ok) {
-                configState.error = `HTTP ${response.status}`;
+                configState.error = \`HTTP \${response.status}\`;
                 return configState;
             }
 
@@ -353,7 +369,7 @@
                     setServerConfigValue('');
                     setServerConfigStatus(value.trim() ? 'saved' : 'cleared');
                 } catch (error) {
-                    setServerConfigStatus(`failed:${error.message}`);
+                    setServerConfigStatus(\`failed:\${error.message}\`);
                 }
             };
 
@@ -431,7 +447,7 @@
                     onChange: (event) => saveUrl(event.target.value),
                 }),
                 React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } }, PROVIDER.settingsHint),
-                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, `Timeout: ${timeoutSec}s`),
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 700, marginTop: 14, marginBottom: 6 } }, \`Timeout: \${timeoutSec}s\`),
                 React.createElement('input', {
                     type: 'range',
                     min: '5',
@@ -480,19 +496,19 @@
                         serverConfigStatus?.startsWith('failed:') && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Save failed')
                     ),
                     serverConfigState?.preview && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 8 } },
-                        `${SERVER_CONFIG.previewLabel}: ${serverConfigState.preview}`
+                        \`\${SERVER_CONFIG.previewLabel}: \${serverConfigState.preview}\`
                     ),
                     serverConfigState?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 8 } },
-                        `${SERVER_CONFIG.errorPrefix}: ${serverConfigState.error}`
+                        \`\${SERVER_CONFIG.errorPrefix}: \${serverConfigState.error}\`
                     )
                 ),
                 React.createElement('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 14 } },
-                    `Addon: ${ADDON_INFO.version}`,
-                    versionStatus?.currentServerVersion ? ` | Server: ${versionStatus.currentServerVersion}` : ''
+                    \`Addon: \${ADDON_INFO.version}\`,
+                    versionStatus?.currentServerVersion ? \` | Server: \${versionStatus.currentServerVersion}\` : ''
                 ),
                 versionStatus?.latestAddonVersion && React.createElement('div', { style: { fontSize: 12, opacity: 0.7, marginTop: 6 } },
-                    `Latest addon: ${versionStatus.latestAddonVersion}`,
-                    versionStatus.latestServerVersion ? ` | Latest server: ${versionStatus.latestServerVersion}` : ''
+                    \`Latest addon: \${versionStatus.latestAddonVersion}\`,
+                    versionStatus.latestServerVersion ? \` | Latest server: \${versionStatus.latestServerVersion}\` : ''
                 ),
                 updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
                     React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
@@ -514,12 +530,12 @@
                         updateAllStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update all failed')
                     ),
                     React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Server only'),
-                    React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\n')),
+                    React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\\n')),
                     React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all'),
-                    React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\n'))
+                    React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\\n'))
                 ),
                 versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },
-                    `Version check failed: ${versionStatus.error}`
+                    \`Version check failed: \${versionStatus.error}\`
                 )
             );
         };
@@ -559,13 +575,13 @@
 
         let response;
         try {
-            const fetchResult = await fetchJsonWithFallback(serverUrl, `/lyrics?${params.toString()}`, timeout);
+            const fetchResult = await fetchJsonWithFallback(serverUrl, \`/lyrics?\${params.toString()}\`, timeout);
             response = fetchResult.response;
             if (fetchResult.baseUrl !== serverUrl) {
                 setSetting(SETTING.SERVER_URL, fetchResult.baseUrl);
             }
         } catch (error) {
-            result.error = `Server connection failed: ${error.message}`;
+            result.error = \`Server connection failed: \${error.message}\`;
             return result;
         }
 
@@ -600,7 +616,7 @@
     const addon = {
         ...ADDON_INFO,
         async init() {
-            window.__ivLyricsDebugLog?.(`[${PROVIDER.id}] initialized`);
+            window.__ivLyricsDebugLog?.(\`[\${PROVIDER.id}] initialized\`);
         },
         getSettingsUI,
         getLyrics,
@@ -616,3 +632,29 @@
 
     register();
 })();
+`;
+}
+
+function buildManifest() {
+    return {
+        addons: definitions.providers.map((provider) => ({
+            name: provider.name,
+            type: 'lyrics',
+            author: 'oneulddu',
+            version: definitions.version,
+            updated: definitions.updated,
+            description: provider.manifestDescription,
+            downloadUrl: `${definitions.rawBaseUrl}/${provider.file}`,
+            githubUrl: definitions.githubUrl,
+            minAppVersion: definitions.minAppVersion,
+        })),
+    };
+}
+
+for (const provider of definitions.providers) {
+    const targetPath = path.join(rootDir, provider.file);
+    fs.writeFileSync(targetPath, buildAddon(provider), 'utf8');
+}
+
+const manifestPath = path.join(rootDir, 'manifest.json');
+fs.writeFileSync(`${manifestPath}`, `${JSON.stringify(buildManifest(), null, 2)}\n`, 'utf8');

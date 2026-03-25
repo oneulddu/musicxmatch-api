@@ -12,6 +12,21 @@ MusicXMatch / Deezer / Bugs 가사 제공자 애드온 for ivLyrics
 - ✅ 캐싱 (30분)
 - ✅ Rust 단일 바이너리 서버
 
+## 개발 메모
+
+`Addon_Lyrics_MusicXMatch.js`, `Addon_Lyrics_Deezer.js`, `Addon_Lyrics_Bugs.js`, `manifest.json`은 수동 편집 대상이 아닙니다.
+소스는 `scripts/addon_definitions.json`과 `scripts/generate_addons.js`에 두고, 변경 후 아래 명령으로 다시 생성합니다.
+
+```bash
+node scripts/generate_addons.js
+```
+
+버전을 올릴 때는 아래 스크립트를 사용하면 정의 파일 갱신과 addon/manifest 재생성이 같이 처리됩니다.
+
+```bash
+./scripts/bump_version.sh 0.6.2
+```
+
 ## 설치
 
 ### Windows
