@@ -370,6 +370,7 @@ impl Musixmatch {
         };
         if let Ok(json) = serde_json::to_vec_pretty(&stored) {
             let _ = std::fs::write(path, json);
+            let _ = set_private_file_permissions(path);
         }
     }
 }
@@ -514,6 +515,22 @@ fn retrieve_session(path: Option<&Path>) -> Option<StoredSession> {
     let path = path?;
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<StoredSession>(&json).ok()
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, permissions)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn random_guid() -> String {
