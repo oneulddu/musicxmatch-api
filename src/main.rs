@@ -718,57 +718,24 @@ fn mask_secret(value: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
-const ADDON_FILES: [&str; 3] = [
-    "Addon_Lyrics_MusicXMatch.js",
-    "Addon_Lyrics_Deezer.js",
-    "Addon_Lyrics_Bugs.js",
-];
-
-const RAW_REPO_BASE_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main";
-
-fn addon_download_url(file_name: &str) -> String {
-    format!("{RAW_REPO_BASE_URL}/{file_name}")
-}
-
-#[cfg(target_os = "windows")]
-fn addon_download_command_lines() -> Vec<String> {
-    ADDON_FILES
-        .iter()
-        .map(|file_name| {
-            format!(
-                "Invoke-WebRequest -Uri \"{}\" -OutFile \"$env:APPDATA\\spicetify\\Extensions\\{}\"",
-                addon_download_url(file_name),
-                file_name
-            )
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn addon_download_command_lines() -> Vec<String> {
-    ADDON_FILES
-        .iter()
-        .map(|file_name| {
-            format!(
-                "curl -fsSL {} -o ~/.config/spicetify/Extensions/{}",
-                addon_download_url(file_name),
-                file_name
-            )
-        })
-        .collect()
+fn update_runner_script_path() -> PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".ivlyrics-musicxmatch");
+    path.push("run-update.sh");
+    path
 }
 
 fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         vec![
-            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
+            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
         ]
     }
     #[cfg(not(target_os = "windows"))]
     {
         vec![
-            "curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
+            "export IVLYRICS_SKIP_ADDONS=1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
         ]
     }
 }
@@ -776,32 +743,25 @@ fn update_server_command_lines() -> Vec<String> {
 fn update_all_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        let mut commands = update_server_command_lines();
-        commands.extend(addon_download_command_lines());
-        commands.push("spicetify apply".to_string());
-        commands
+        vec!["iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()]
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let mut commands = update_server_command_lines();
-        commands.extend(addon_download_command_lines());
-        commands.push("spicetify apply".to_string());
-        commands
+        vec!["curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string()]
     }
 }
 
 fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let addon_steps = if include_addon {
-            let steps = addon_download_command_lines().join("; ");
-            format!("; {steps}; spicetify apply")
+        let install_command = if include_addon {
+            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()
         } else {
-            String::new()
+            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()
         };
         let command = format!(
-            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex{}'",
-            addon_steps
+            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; {}'",
+            install_command
         );
         Command::new("powershell.exe")
             .args([
@@ -818,28 +778,60 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let path = runtime_path();
         let update_log = update_log_file_path();
+        let runner_script = update_runner_script_path();
         if let Some(parent) = update_log.parent() {
             let _ = create_dir_all(parent);
         }
-        let addon_steps = if include_addon {
-            let steps = addon_download_command_lines().join("; ");
-            format!("; mkdir -p ~/.config/spicetify/Extensions; {steps}; spicetify apply")
+        if let Some(parent) = runner_script.parent() {
+            create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+
+        let mut script_lines = vec![
+            "#!/bin/sh".to_string(),
+            "set -eu".to_string(),
+            format!("export HOME='{}'", home_dir.display()),
+            format!("export PATH='{}'", path),
+            format!("echo \"[update] 시작 include_addon={include_addon}\""),
+            "echo \"[update] HOME=$HOME\"".to_string(),
+            "echo \"[update] PATH=$PATH\"".to_string(),
+            "sleep 1".to_string(),
+        ];
+
+        if include_addon {
+            script_lines.push(
+                "curl -fsSL 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh' | bash"
+                    .to_string(),
+            );
         } else {
-            String::new()
-        };
-        let command = format!(
-            "sleep 1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash{}",
-            addon_steps
-        );
+            script_lines.push("export IVLYRICS_SKIP_ADDONS=1".to_string());
+            script_lines.push(
+                "curl -fsSL 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh' | bash"
+                    .to_string(),
+            );
+        }
+
+        script_lines.push("echo \"[update] 완료\"".to_string());
+        std::fs::write(&runner_script, format!("{}\n", script_lines.join("\n")))
+            .map_err(|error| error.to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&runner_script, permissions)
+                .map_err(|error| error.to_string())?;
+        }
+
         Command::new("sh")
             .env("PATH", path)
             .args([
                 "-c",
                 &format!(
-                    "nohup sh -c '{}' >> '{}' 2>&1 &",
-                    command,
+                    "nohup sh '{}' >> '{}' 2>&1 &",
+                    runner_script.display(),
                     update_log.display()
                 ),
             ])

@@ -12,6 +12,36 @@ BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
 SERVER_URL="http://127.0.0.1:8092"
 RUNTIME_PATH="$HOME/.cargo/bin:$HOME/.spicetify:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+SKIP_ADDONS="${IVLYRICS_SKIP_ADDONS:-0}"
+
+download_addon() {
+    local addon_name="$1"
+    local addon_path="$EXTENSIONS_DIR/$addon_name"
+    local addon_url="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$addon_name"
+
+    curl -fsSL "$addon_url" -o "$addon_path"
+}
+
+register_addon() {
+    local addon_name="$1"
+
+    if ! printf '%s\n' "$CURRENT_EXTENSIONS" | tr '|' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$addon_name"; then
+        spicetify config extensions "$addon_name"
+        CURRENT_EXTENSIONS="${CURRENT_EXTENSIONS}${CURRENT_EXTENSIONS:+ | }$addon_name"
+    fi
+}
+
+install_addons() {
+    mkdir -p "$EXTENSIONS_DIR"
+    CURRENT_EXTENSIONS="$(spicetify config extensions 2>/dev/null || true)"
+
+    for addon_name in "${ADDON_NAMES[@]}"; do
+        download_addon "$addon_name"
+        register_addon "$addon_name"
+    done
+
+    spicetify apply
+}
 
 echo "[1/7] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
@@ -95,23 +125,12 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
 }
 
 echo "[7/7] Installing ivLyrics addons..."
-if ! command -v spicetify >/dev/null 2>&1; then
+if [[ "$SKIP_ADDONS" == "1" ]]; then
+    echo "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration."
+elif ! command -v spicetify >/dev/null 2>&1; then
     echo "spicetify is not installed or not in PATH. Skipping addon registration."
 else
-    mkdir -p "$EXTENSIONS_DIR"
-    CURRENT_EXTENSIONS="$(spicetify config extensions 2>/dev/null || true)"
-    for ADDON_NAME in "${ADDON_NAMES[@]}"; do
-        ADDON_PATH="$EXTENSIONS_DIR/$ADDON_NAME"
-        ADDON_URL="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$ADDON_NAME"
-        curl -fsSL "$ADDON_URL" -o "$ADDON_PATH"
-
-        if ! printf '%s\n' "$CURRENT_EXTENSIONS" | tr '|' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$ADDON_NAME"; then
-            spicetify config extensions "$ADDON_NAME"
-            CURRENT_EXTENSIONS="${CURRENT_EXTENSIONS}${CURRENT_EXTENSIONS:+ | }$ADDON_NAME"
-        fi
-    done
-
-    spicetify apply
+    install_addons
 fi
 
 echo ""

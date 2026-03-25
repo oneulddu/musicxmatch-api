@@ -198,10 +198,11 @@ systemctl --user restart ivlyrics-musicxmatch
 ```
 
 설정 화면에는 두 가지 버튼이 있습니다.
-- `Update now`: 서버 설치 스크립트만 다시 실행
-- `Update all`: 서버 설치 스크립트 실행 + 세 애드온 파일 갱신 + `spicetify apply`
+- `Update now`: 서버만 다시 설치하고 재시작합니다. 애드온 파일과 `spicetify apply`는 건너뜁니다.
+- `Update all`: 설치 스크립트를 전체 모드로 다시 실행해서 서버, 애드온 파일, `spicetify apply`를 한 번에 처리합니다.
 
 `Update all`은 Spotify UI가 다시 적용되므로 실행 시 잠깐 재로딩될 수 있습니다.
+두 버튼 모두 백그라운드 작업으로 예약되며, macOS/Linux에서는 `~/.ivlyrics-musicxmatch/update.log`에서 진행 상태를 바로 확인할 수 있습니다.
 
 ## 제거
 

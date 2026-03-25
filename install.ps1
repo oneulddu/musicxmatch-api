@@ -10,6 +10,35 @@ $TaskName = "ivLyrics-MusicXMatch"
 $BinPath = "$env:USERPROFILE\.cargo\bin\ivlyrics-musicxmatch-server.exe"
 $ServerUrl = "http://127.0.0.1:8092"
 $RunnerScript = Join-Path $InstallDir "run-server.ps1"
+$SkipAddons = $env:IVLYRICS_SKIP_ADDONS -eq "1"
+
+function Install-Addons {
+    param (
+        [string[]]$AddonNames,
+        [string]$ExtensionsDir
+    )
+
+    New-Item -ItemType Directory -Force -Path $ExtensionsDir | Out-Null
+
+    $CurrentExtensions = (spicetify config extensions 2>$null | Out-String).Trim()
+    $ExtensionList = @()
+    if ($CurrentExtensions) {
+        $ExtensionList = $CurrentExtensions -split '\s*\|\s*' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    }
+
+    foreach ($AddonName in $AddonNames) {
+        $AddonPath = Join-Path $ExtensionsDir $AddonName
+        $AddonUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$AddonName"
+        Invoke-WebRequest -Uri $AddonUrl -OutFile $AddonPath
+
+        if ($ExtensionList -notcontains $AddonName) {
+            spicetify config extensions $AddonName | Out-Null
+            $ExtensionList += $AddonName
+        }
+    }
+
+    spicetify apply
+}
 
 Write-Host "[1/7] Creating installation directory..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -49,30 +78,15 @@ if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
 }
 
 Write-Host "[7/7] Installing ivLyrics addons..." -ForegroundColor Yellow
-$Spicetify = Get-Command spicetify -ErrorAction SilentlyContinue
-if (-not $Spicetify) {
-    Write-Warning "spicetify is not installed or not in PATH. Skipping addon registration."
+if ($SkipAddons) {
+    Write-Host "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration." -ForegroundColor DarkYellow
 } else {
-    New-Item -ItemType Directory -Force -Path $ExtensionsDir | Out-Null
-
-    $CurrentExtensions = (spicetify config extensions 2>$null | Out-String).Trim()
-    $ExtensionList = @()
-    if ($CurrentExtensions) {
-        $ExtensionList = $CurrentExtensions -split '\s*\|\s*' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $Spicetify = Get-Command spicetify -ErrorAction SilentlyContinue
+    if (-not $Spicetify) {
+    Write-Warning "spicetify is not installed or not in PATH. Skipping addon registration."
+    } else {
+        Install-Addons -AddonNames $AddonNames -ExtensionsDir $ExtensionsDir
     }
-
-    foreach ($AddonName in $AddonNames) {
-        $AddonPath = Join-Path $ExtensionsDir $AddonName
-        $AddonUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$AddonName"
-        Invoke-WebRequest -Uri $AddonUrl -OutFile $AddonPath
-
-        if ($ExtensionList -notcontains $AddonName) {
-            spicetify config extensions $AddonName | Out-Null
-            $ExtensionList += $AddonName
-        }
-    }
-
-    spicetify apply
 }
 
 Write-Host ""
