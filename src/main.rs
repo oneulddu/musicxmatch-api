@@ -394,6 +394,26 @@ async fn save_config(
         deezer_arl: next_arl,
     };
 
+    if let Some(arl) = next.deezer_arl.as_deref() {
+        match state.deezer.validate_arl(arl).await {
+            Ok(()) => state
+                .logger
+                .log_tagged("Deezer", "설정 검증 성공"),
+            Err(error) => {
+                state.logger.log_tagged(
+                    "Deezer",
+                    &format!("설정 검증 실패 detail={}", error),
+                );
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    ErrorPayload {
+                        detail: format!("Invalid Deezer ARL: {error}"),
+                    },
+                );
+            }
+        }
+    }
+
     if let Err(error) = save_config_file(&state.config_path, &next) {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -402,7 +422,9 @@ async fn save_config(
     }
 
     *state.config.lock().await = next.clone();
-    state.deezer.clear_token().await;
+    if next.deezer_arl.is_none() {
+        state.deezer.clear_token().await;
+    }
     json_response(StatusCode::OK, config_payload(&next))
 }
 

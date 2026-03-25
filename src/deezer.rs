@@ -1,6 +1,6 @@
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE};
 use serde::Deserialize;
@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 const AUTH_URL: &str = "https://auth.deezer.com/login/arl";
 const SEARCH_URL: &str = "https://api.deezer.com/search";
 const GRAPHQL_URL: &str = "https://pipe.deezer.com/api";
+const AUTH_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 
 const LYRICS_QUERY: &str = r#"query GetLyrics($trackId: String!) {
   track(trackId: $trackId) {
@@ -43,7 +44,7 @@ const LYRICS_QUERY: &str = r#"query GetLyrics($trackId: String!) {
 #[derive(Clone)]
 pub struct DeezerClient {
     http: reqwest::Client,
-    jwt: Arc<Mutex<Option<String>>>,
+    auth_state: Arc<Mutex<AuthState>>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,12 +95,21 @@ impl DeezerClient {
 
         Self {
             http,
-            jwt: Arc::new(Mutex::new(None)),
+            auth_state: Arc::new(Mutex::new(AuthState::default())),
         }
     }
 
     pub async fn clear_token(&self) {
-        *self.jwt.lock().await = None;
+        let mut state = self.auth_state.lock().await;
+        state.jwt = None;
+        state.last_auth_failure = None;
+    }
+
+    pub async fn validate_arl(&self, arl: &str) -> Result<(), DeezerError> {
+        if arl.trim().is_empty() {
+            return Err(DeezerError::ConfigMissing);
+        }
+        self.refresh_token(arl).await.map(|_| ())
     }
 
     pub async fn search_tracks(
@@ -174,14 +184,25 @@ impl DeezerClient {
     }
 
     async fn get_token(&self, arl: &str) -> Result<String, DeezerError> {
-        if let Some(token) = self.jwt.lock().await.clone() {
-            return Ok(token);
+        {
+            let state = self.auth_state.lock().await;
+            if let Some(token) = state.jwt.clone() {
+                return Ok(token);
+            }
+            if let Some(failure) = state.last_auth_failure.as_ref() {
+                if failure.at.elapsed() < AUTH_FAILURE_COOLDOWN {
+                    return Err(DeezerError::Auth(format!(
+                        "recent auth failure cached: {}",
+                        failure.detail
+                    )));
+                }
+            }
         }
         self.refresh_token(arl).await
     }
 
     async fn refresh_token(&self, arl: &str) -> Result<String, DeezerError> {
-        let response = self
+        let response = match self
             .http
             .post(AUTH_URL)
             .query(&[("jo", "p"), ("rto", "c"), ("i", "c")])
@@ -190,26 +211,33 @@ impl DeezerClient {
             .body("")
             .send()
             .await
-            .map_err(|error| DeezerError::Auth(error.to_string()))?;
+        {
+            Ok(response) => response,
+            Err(error) => return Err(self.auth_error(error.to_string()).await),
+        };
 
         if !response.status().is_success() {
-            return Err(DeezerError::Auth(format!(
-                "login returned {}",
-                response.status()
-            )));
+            return Err(self
+                .auth_error(format!("login returned {}", response.status()))
+                .await);
         }
 
-        let payload = response
+        let payload = match response
             .json::<DeezerAuthResponse>()
             .await
-            .map_err(|error| DeezerError::Auth(error.to_string()))?;
+        {
+            Ok(payload) => payload,
+            Err(error) => return Err(self.auth_error(error.to_string()).await),
+        };
 
-        let jwt = payload
-            .jwt
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| DeezerError::Auth("missing JWT token".to_string()))?;
+        let jwt = match payload.jwt.filter(|value| !value.trim().is_empty()) {
+            Some(jwt) => jwt,
+            None => return Err(self.auth_error("missing JWT token".to_string()).await),
+        };
 
-        *self.jwt.lock().await = Some(jwt.clone());
+        let mut state = self.auth_state.lock().await;
+        state.jwt = Some(jwt.clone());
+        state.last_auth_failure = None;
         Ok(jwt)
     }
 
@@ -244,11 +272,54 @@ impl DeezerClient {
             .await
             .map_err(|error| DeezerError::Provider(error.to_string()))?;
 
+        if let Some(errors) = body.errors {
+            if !errors.is_empty() {
+                let detail = errors
+                    .into_iter()
+                    .filter_map(|error| {
+                        let message = error.message.trim().to_string();
+                        (!message.is_empty()).then_some(message)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+
+                let lowered = detail.to_ascii_lowercase();
+                if lowered.contains("unauthorized") || lowered.contains("forbidden") {
+                    return Err(DeezerError::Auth(detail));
+                }
+                if lowered.contains("not found") || lowered.contains("not available") {
+                    return Err(DeezerError::NotAvailable);
+                }
+                return Err(DeezerError::Provider(detail));
+            }
+        }
+
         body.data
             .and_then(|data| data.track)
             .and_then(|track| track.lyrics)
             .ok_or(DeezerError::NotFound)
     }
+
+    async fn auth_error(&self, detail: String) -> DeezerError {
+        let mut state = self.auth_state.lock().await;
+        state.jwt = None;
+        state.last_auth_failure = Some(AuthFailure {
+            at: Instant::now(),
+            detail: detail.clone(),
+        });
+        DeezerError::Auth(detail)
+    }
+}
+
+#[derive(Default)]
+struct AuthState {
+    jwt: Option<String>,
+    last_auth_failure: Option<AuthFailure>,
+}
+
+struct AuthFailure {
+    at: Instant,
+    detail: String,
 }
 
 fn build_search_query(title: &str, artist: &str) -> String {
@@ -387,6 +458,7 @@ struct DeezerArtist {
 #[derive(Debug, Deserialize)]
 struct GraphQlResponse {
     data: Option<GraphQlData>,
+    errors: Option<Vec<GraphQlError>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +469,11 @@ struct GraphQlData {
 #[derive(Debug, Deserialize)]
 struct GraphQlTrack {
     lyrics: Option<DeezerLyricsPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
