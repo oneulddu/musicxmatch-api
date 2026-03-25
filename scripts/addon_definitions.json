@@ -1,5 +1,5 @@
 {
-  "version": "0.7.0",
+  "version": "0.7.1",
   "updated": "2026-03-25",
   "defaultServerUrl": "http://127.0.0.1:8092",
   "defaultTimeoutSec": 15,

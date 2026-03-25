@@ -3,7 +3,7 @@
  * @addon-type  lyrics
  * @id          bugs-provider
  * @name        Bugs Provider
- * @version     0.7.0
+ * @version     0.7.1
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -15,7 +15,7 @@
     "id": "bugs-provider",
     "name": "Bugs Provider",
     "backend": "bugs",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "author": "oneulddu",
     "description": "Fetches synced or plain lyrics from Bugs through the local bridge server.",
     "settingsTitle": "Lyrics bridge server",

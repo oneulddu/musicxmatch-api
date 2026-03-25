@@ -3,7 +3,7 @@
  * @addon-type  lyrics
  * @id          genie-provider
  * @name        Genie Provider
- * @version     0.7.0
+ * @version     0.7.1
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -15,7 +15,7 @@
     "id": "genie-provider",
     "name": "Genie Provider",
     "backend": "genie",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "author": "oneulddu",
     "description": "Fetches synced lyrics from Genie through the local bridge server.",
     "settingsTitle": "Lyrics bridge server",
