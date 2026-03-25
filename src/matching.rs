@@ -87,28 +87,14 @@ pub fn similarity(a: &str, b: &str) -> f32 {
 }
 
 pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Option<f32>) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
-        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
-
-    if want_title == track_title {
-        score += EXACT_TITLE_BONUS;
-    } else if track_title.contains(&want_title) {
-        score += PARTIAL_TITLE_BONUS;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += ARTIST_MATCH_BONUS;
-    }
-
-    if let Some(want_duration) = duration_secs {
-        let actual_duration = track.track_length as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
+    let mut score = score_basic_match(
+        title,
+        artist,
+        &track.track_name,
+        &track.artist_name,
+        duration_secs,
+        Some(track.track_length as f32 / 1000.0),
+    );
 
     if track.has_subtitles {
         score += SUBTITLE_BONUS;
@@ -120,21 +106,6 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
         score += LYRICS_BONUS;
     }
 
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= NOISE_PENALTY;
-        }
-    }
-
     score
 }
 
@@ -144,45 +115,14 @@ pub fn score_deezer_track(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
-        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
-
-    if want_title == track_title {
-        score += EXACT_TITLE_BONUS;
-    } else if track_title.contains(&want_title) {
-        score += PARTIAL_TITLE_BONUS;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += ARTIST_MATCH_BONUS;
-    }
-
-    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
-        let actual_duration = actual_ms as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
-
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= NOISE_PENALTY;
-        }
-    }
-
-    score
+    score_basic_match(
+        title,
+        artist,
+        &track.track_name,
+        &track.artist_name,
+        duration_secs,
+        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+    )
 }
 
 pub fn score_bugs_track(
@@ -191,45 +131,14 @@ pub fn score_bugs_track(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> f32 {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
-        + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
-
-    if want_title == track_title {
-        score += EXACT_TITLE_BONUS;
-    } else if track_title.contains(&want_title) {
-        score += PARTIAL_TITLE_BONUS;
-    }
-
-    if want_artist == track_artist || track_artist.contains(&want_artist) {
-        score += ARTIST_MATCH_BONUS;
-    }
-
-    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
-        let actual_duration = actual_ms as f32 / 1000.0;
-        score += duration_score((actual_duration - want_duration).abs());
-    }
-
-    let noise = format!("{track_title} {track_artist}");
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
-        if noise.contains(word) {
-            score -= NOISE_PENALTY;
-        }
-    }
-
-    score
+    score_basic_match(
+        title,
+        artist,
+        &track.track_name,
+        &track.artist_name,
+        duration_secs,
+        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+    )
 }
 
 pub fn score_genie_track(
@@ -238,10 +147,28 @@ pub fn score_genie_track(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> f32 {
+    score_basic_match(
+        title,
+        artist,
+        &track.track_name,
+        &track.artist_name,
+        duration_secs,
+        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+    )
+}
+
+fn score_basic_match(
+    title: &str,
+    artist: &str,
+    track_title: &str,
+    track_artist: &str,
+    duration_secs: Option<f32>,
+    actual_duration_secs: Option<f32>,
+) -> f32 {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
+    let track_title = simplify(track_title);
+    let track_artist = normalize(track_artist);
 
     let mut score = similarity(&want_title, &track_title) * TITLE_SIMILARITY_WEIGHT
         + similarity(&want_artist, &track_artist) * ARTIST_SIMILARITY_WEIGHT;
@@ -256,8 +183,7 @@ pub fn score_genie_track(
         score += ARTIST_MATCH_BONUS;
     }
 
-    if let (Some(want_duration), Some(actual_ms)) = (duration_secs, track.duration_ms) {
-        let actual_duration = actual_ms as f32 / 1000.0;
+    if let (Some(want_duration), Some(actual_duration)) = (duration_secs, actual_duration_secs) {
         score += duration_score((actual_duration - want_duration).abs());
     }
 
