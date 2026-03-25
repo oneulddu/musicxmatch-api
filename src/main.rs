@@ -24,8 +24,8 @@ use bugs::{BugsClient, BugsError, BugsTrack};
 use deezer::{DeezerClient, DeezerError, DeezerTrack};
 use genie::{GenieClient, GenieError, GenieTrack};
 use logging::{
-    backend_log_tag, bool_text, display_opt_text, display_opt_u64, display_str, provider_log_tag,
-    Logger,
+    backend_log_tag, bool_text, display_opt_text, display_opt_u64, display_str, matched_by_text,
+    provider_log_tag, translate_log_detail, Logger,
 };
 use matching::{
     artist_variants, can_use_title_only_fallback, is_acceptable_bugs_match,
@@ -109,6 +109,8 @@ struct LyricsPayload {
     lrc: Option<String>,
     text: Option<String>,
     cached: bool,
+    #[serde(skip_serializing)]
+    matched_by: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     debug: Option<DebugPayload>,
 }
@@ -468,9 +470,18 @@ async fn get_lyrics(
 
     let cache_key = build_cache_key(&title, &artist, &spotify_id, backend);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
-        state
-            .logger
-            .log_tagged(request_tag, &format!("캐시 적중 key={cache_key}"));
+        state.logger.log_tagged(
+            provider_log_tag(cached.provider),
+            &format!(
+                "캐시 사용 title={:?} artist={:?} matched_by={} track_id={} synced={} plain={} key={cache_key}",
+                display_str(&title),
+                display_str(&artist),
+                matched_by_text(cached.matched_by),
+                display_opt_u64(cached.track_id),
+                bool_text(cached.lrc.is_some()),
+                bool_text(cached.text.is_some())
+            ),
+        );
         return json_response(StatusCode::OK, cached);
     }
 
@@ -489,9 +500,10 @@ async fn get_lyrics(
             state.logger.log_tagged(
                 provider_log_tag(payload.provider),
                 &format!(
-                    "가사 조회 성공 title={:?} artist={:?} track_id={} synced={} plain={}",
+                    "가사 조회 성공 title={:?} artist={:?} matched_by={} track_id={} synced={} plain={}",
                     display_opt_text(payload.track_name.as_deref()),
                     display_opt_text(payload.artist_name.as_deref()),
+                    matched_by_text(payload.matched_by),
                     display_opt_u64(payload.track_id),
                     bool_text(payload.lrc.is_some()),
                     bool_text(payload.text.is_some())
@@ -506,11 +518,12 @@ async fn get_lyrics(
             state.logger.log_tagged(
                 request_tag,
                 &format!(
-                    "가사 조회 실패 title={:?} artist={:?} spotify_id={:?} status={} detail={detail}",
+                    "가사 조회 실패 title={:?} artist={:?} spotify_id={:?} status={} detail={} raw_detail={detail}",
                     display_str(&title),
                     display_str(&artist),
                     display_str(&spotify_id),
-                    status.as_u16()
+                    status.as_u16(),
+                    translate_log_detail(&detail),
                 ),
             );
             json_response(status, ErrorPayload { detail })
@@ -1049,6 +1062,7 @@ async fn fetch_musixmatch_payload(
             mxm,
             TrackId::Spotify(spotify_id.to_owned().into()),
             None,
+            "track_id",
             duration_secs,
             include_debug.then(|| DebugPayload {
                 source: "spotify_id",
@@ -1070,6 +1084,7 @@ async fn fetch_musixmatch_payload(
         mxm,
         TrackId::TrackId(resolution.track.track_id),
         Some(resolution.track),
+        resolution.matched_by,
         duration_secs,
         include_debug.then(|| DebugPayload {
             source: "search",
@@ -1087,6 +1102,7 @@ async fn fetch_by_id(
     mxm: &Musixmatch,
     id: TrackId<'static>,
     known_track: Option<Track>,
+    matched_by: &'static str,
     duration_secs: Option<f32>,
     debug: Option<DebugPayload>,
 ) -> Result<LyricsPayload, MxmError> {
@@ -1119,6 +1135,7 @@ async fn fetch_by_id(
                 lrc: Some(subtitle.subtitle_body),
                 text: None,
                 cached: false,
+                matched_by: Some(matched_by),
                 debug,
             });
         }
@@ -1138,6 +1155,7 @@ async fn fetch_by_id(
         lrc: None,
         text: Some(text),
         cached: false,
+        matched_by: Some(matched_by),
         debug,
     })
 }
@@ -1163,6 +1181,7 @@ async fn fetch_deezer_payload(
                     lrc: payload.lrc,
                     text: payload.text,
                     cached: false,
+                    matched_by: Some(resolution.matched_by),
                     debug: include_debug.then(|| DebugPayload {
                         source: "deezer_search",
                         matched_by: resolution.matched_by,
@@ -1201,6 +1220,7 @@ async fn fetch_bugs_payload(
                     lrc: payload.lrc,
                     text: payload.text,
                     cached: false,
+                    matched_by: Some(resolution.matched_by),
                     debug: include_debug.then(|| DebugPayload {
                         source: "bugs_search",
                         matched_by: resolution.matched_by,
@@ -1239,6 +1259,7 @@ async fn fetch_genie_payload(
                     lrc: payload.lrc,
                     text: payload.text,
                     cached: false,
+                    matched_by: Some(resolution.matched_by),
                     debug: include_debug.then(|| DebugPayload {
                         source: "genie_search",
                         matched_by: resolution.matched_by,

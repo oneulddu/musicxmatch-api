@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::BackendMode;
+use time::format_description::FormatItem;
+use time::macros::format_description;
+
+const LOG_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 #[derive(Clone)]
 pub struct Logger {
@@ -39,11 +44,11 @@ impl Logger {
 }
 
 fn timestamp_string() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs().to_string(),
-        Err(_) => "0".to_string(),
-    }
+    let now = time::OffsetDateTime::now_utc().to_offset(
+        time::UtcOffset::from_hms(9, 0, 0).unwrap_or(time::UtcOffset::UTC),
+    );
+    now.format(LOG_TIMESTAMP_FORMAT)
+        .unwrap_or_else(|_| "0000-00-00 00:00:00".to_string())
 }
 
 pub fn backend_log_tag(backend: BackendMode) -> &'static str {
@@ -93,5 +98,32 @@ pub fn bool_text(value: bool) -> &'static str {
         "true"
     } else {
         "false"
+    }
+}
+
+pub fn matched_by_text(value: Option<&'static str>) -> &'static str {
+    match value.unwrap_or("-") {
+        "track_id" => "트랙 ID 직접 조회",
+        "search:title+artist" => "제목+아티스트 검색",
+        "search:title" => "제목 검색",
+        "search:artist" => "아티스트 검색",
+        "matcher:variants" => "변형 매처",
+        "matcher:original" => "원본 매처",
+        _ => "-",
+    }
+}
+
+pub fn translate_log_detail(detail: &str) -> String {
+    match detail.trim() {
+        "No tracks found" => "트랙을 찾지 못함".to_string(),
+        "No lyrics are available for this track" => "가사를 찾지 못함".to_string(),
+        "Musixmatch session expired. Retry in a moment." => "Musixmatch 세션이 만료됨".to_string(),
+        "Configured Deezer ARL cookie is invalid or expired." => {
+            "Deezer ARL 설정이 잘못되었거나 만료됨".to_string()
+        }
+        other if other.starts_with("Invalid Deezer ARL:") => {
+            "Deezer ARL 설정 검증 실패".to_string()
+        }
+        other => other.to_string(),
     }
 }
