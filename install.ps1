@@ -53,8 +53,8 @@ cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyri
 
 Write-Host "[4/7] Setting up auto-start..." -ForegroundColor Yellow
 $RunnerBody = @"
-$env:MXM_SESSION_FILE = "$InstallDir\musixmatch_session.json"
-$env:IVLYRICS_MXM_LOG = "$InstallDir\server.log"
+`$env:MXM_SESSION_FILE = "$InstallDir\musixmatch_session.json"
+`$env:IVLYRICS_MXM_LOG = "$InstallDir\server.log"
 & "$BinPath" *>> "$InstallDir\server.stdout.log"
 "@
 Set-Content -Path $RunnerScript -Value $RunnerBody -Encoding UTF8
