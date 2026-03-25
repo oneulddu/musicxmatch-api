@@ -320,6 +320,7 @@ fn log_file_path() -> PathBuf {
     path
 }
 
+#[cfg(not(target_os = "windows"))]
 fn update_log_file_path() -> PathBuf {
     if let Ok(value) = std::env::var("IVLYRICS_MXM_UPDATE_LOG") {
         return PathBuf::from(value);
@@ -724,6 +725,7 @@ fn current_platform() -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn runtime_path() -> String {
     let mut parts = vec![
         "/usr/bin".to_string(),
@@ -818,6 +820,7 @@ fn mask_secret(value: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
+#[cfg(not(target_os = "windows"))]
 fn update_runner_script_path() -> PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push(".ivlyrics-musicxmatch");
