@@ -66,13 +66,12 @@
 
 ### 2.3 timeout 설정 외부화
 **현재 상태**
-- provider 타임아웃은 코드에 고정돼 있습니다.
+- 반영 완료: 환경 변수로 공통 timeout과 provider별 override를 줄 수 있습니다.
 
-**제안**
-- 환경 변수 하나로 공통 timeout을 주고, 필요하면 provider별 override 허용
-
-**우선순위**
-- 중간
+**메모**
+- 공통: `IVLYRICS_HTTP_TIMEOUT_SECS`
+- provider별: `IVLYRICS_MUSIXMATCH_TIMEOUT_SECS`, `IVLYRICS_DEEZER_TIMEOUT_SECS`, `IVLYRICS_BUGS_TIMEOUT_SECS`, `IVLYRICS_GENIE_TIMEOUT_SECS`
+- 업데이트 체크: `IVLYRICS_UPDATE_TIMEOUT_SECS`
 
 ### 2.4 health 응답에 provider 상태 확장
 **현재 상태**
@@ -199,9 +198,8 @@ strip = true
 ### 중간
 1. scoring 중복 축소
 2. provider별 재시도 정책 정리
-3. timeout 설정 외부화
-4. 통합 테스트 확대
-5. fixture 기반 파서 테스트
+3. 통합 테스트 확대
+4. fixture 기반 파서 테스트
 
 ### 중간-낮음
 1. health 응답 provider 상태 세분화

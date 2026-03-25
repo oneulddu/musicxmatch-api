@@ -87,9 +87,9 @@ impl fmt::Display for DeezerError {
 }
 
 impl DeezerClient {
-    pub fn new() -> Self {
+    pub fn new(timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(timeout)
             .build()
             .expect("failed to construct Deezer HTTP client");
 

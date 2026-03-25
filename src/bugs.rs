@@ -48,9 +48,9 @@ impl fmt::Display for BugsError {
 }
 
 impl BugsClient {
-    pub fn new() -> Self {
+    pub fn new(timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(timeout)
             .user_agent("Mozilla/5.0 (compatible; ivLyrics-MusicXMatch/1.0)")
             .build()
             .expect("failed to construct Bugs HTTP client");

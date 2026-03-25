@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -44,6 +45,7 @@ struct MusixmatchRef {
 #[derive(Default)]
 pub struct MusixmatchBuilder {
     storage_file: Option<PathBuf>,
+    timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,14 +383,22 @@ impl MusixmatchBuilder {
         self
     }
 
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     pub fn build(self) -> Result<Musixmatch, Error> {
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, "AWSELBCORS=0; AWSELB=0".parse().unwrap());
 
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .user_agent(DEFAULT_UA)
-            .default_headers(headers)
-            .build()?;
+            .default_headers(headers);
+        if let Some(timeout) = self.timeout {
+            builder = builder.timeout(timeout);
+        }
+        let http = builder.build()?;
 
         let session_path = self.storage_file;
         let stored_session = retrieve_session(session_path.as_deref());

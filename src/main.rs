@@ -41,6 +41,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_UPDATE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 8092;
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
@@ -226,9 +228,9 @@ async fn main() {
 
     let state = AppState {
         mxm: build_client(),
-        deezer: DeezerClient::new(),
-        bugs: BugsClient::new(),
-        genie: GenieClient::new(),
+        deezer: DeezerClient::new(provider_timeout("DEEZER", DEFAULT_PROVIDER_TIMEOUT_SECS)),
+        bugs: BugsClient::new(provider_timeout("BUGS", DEFAULT_PROVIDER_TIMEOUT_SECS)),
+        genie: GenieClient::new(provider_timeout("GENIE", DEFAULT_PROVIDER_TIMEOUT_SECS)),
         cache: Arc::new(Mutex::new(HashMap::new())),
         config: Arc::new(Mutex::new(load_config(&config_path))),
         config_path,
@@ -274,8 +276,26 @@ fn build_client() -> Musixmatch {
 
     Musixmatch::builder()
         .storage_file(storage_file)
+        .timeout(provider_timeout(
+            "MUSIXMATCH",
+            DEFAULT_PROVIDER_TIMEOUT_SECS,
+        ))
         .build()
         .expect("failed to construct Musixmatch client")
+}
+
+fn provider_timeout(provider: &str, default_secs: u64) -> Duration {
+    let provider_key = format!("IVLYRICS_{}_TIMEOUT_SECS", provider);
+    read_timeout_secs(&provider_key)
+        .or_else(|| read_timeout_secs("IVLYRICS_HTTP_TIMEOUT_SECS"))
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
+fn read_timeout_secs(key: &str) -> Option<u64> {
+    let raw = std::env::var(key).ok()?;
+    let value = raw.trim().parse::<u64>().ok()?;
+    (value > 0).then_some(value)
 }
 
 fn session_file_path() -> PathBuf {
@@ -631,7 +651,10 @@ fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
 
 async fn latest_version_info() -> Result<VersionInfo, String> {
     let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(
+            read_timeout_secs("IVLYRICS_UPDATE_TIMEOUT_SECS")
+                .unwrap_or(DEFAULT_UPDATE_TIMEOUT_SECS),
+        ))
         .build()
         .map_err(|error| error.to_string())?
         .get(VERSION_INFO_URL)
