@@ -3,7 +3,7 @@
  * @addon-type  lyrics
  * @id          musicxmatch-provider
  * @name        MusicXMatch Provider
- * @version     0.7.11
+ * @version     0.7.12
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -15,7 +15,7 @@
     "id": "musicxmatch-provider",
     "name": "MusicXMatch Provider",
     "backend": "musicxmatch",
-    "version": "0.7.11",
+    "version": "0.7.12",
     "author": "oneulddu",
     "description": "Fetches synced or plain lyrics from MusicXMatch through the local bridge server.",
     "settingsTitle": "MusicXMatch server",

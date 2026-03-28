@@ -7,6 +7,8 @@ $addonDir = "$env:LOCALAPPDATA\spicetify\CustomApps\ivLyrics"
 $sourcesDir = "$env:LOCALAPPDATA\spicetify\ivLyrics"
 $manifestPath = Join-Path $addonDir "manifest.json"
 $sourcesPath = Join-Path $sourcesDir "addon_sources.json"
+$repoRawMainPrefix = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
+$resolvedRef = $null
 $spotifyWasRunning = $false
 $spotifyPath = $null
 
@@ -51,7 +53,26 @@ foreach ($url in $Urls) {
         throw "Invalid addon URL: $url"
     }
 
-    if ($cleanUrl.StartsWith('https://raw.githubusercontent.com/')) {
+    if ($cleanUrl.StartsWith($repoRawMainPrefix)) {
+        if (-not $resolvedRef) {
+            try {
+                $resolvedRef = (Invoke-RestMethod -Uri "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main" -UseBasicParsing).sha
+            } catch {
+                $resolvedRef = $null
+            }
+        }
+
+        if ($resolvedRef) {
+            $relativePath = $cleanUrl.Substring($repoRawMainPrefix.Length)
+            $downloadUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/$resolvedRef/$relativePath"
+        } else {
+            $separator = '?'
+            if ($url.Contains('?')) {
+                $separator = '&'
+            }
+            $downloadUrl = "$url$separator" + "ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+        }
+    } elseif ($cleanUrl.StartsWith('https://raw.githubusercontent.com/')) {
         $separator = '?'
         if ($url.Contains('?')) {
             $separator = '&'

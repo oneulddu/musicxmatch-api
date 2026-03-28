@@ -24,6 +24,8 @@ fi
 mkdir -p "$ADDON_DIR" "$SOURCES_DIR"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ivlyrics-addon-compat.XXXXXX")"
+REPO_RAW_MAIN_PREFIX="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
+resolved_ref=""
 
 spotify_was_running=0
 
@@ -51,6 +53,17 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+resolve_repo_ref() {
+    if [ -n "$resolved_ref" ]; then
+        return
+    fi
+
+    resolved_ref="$(
+        curl -fsSL "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null || true
+    )"
+}
+
 for url in "$@"; do
     clean_url="${url%%\?*}"
     filename=$(basename "$clean_url")
@@ -64,6 +77,18 @@ for url in "$@"; do
     esac
 
     case "$clean_url" in
+        "$REPO_RAW_MAIN_PREFIX"*)
+            resolve_repo_ref
+            if [ -n "$resolved_ref" ]; then
+                download_url="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/$resolved_ref/${clean_url#"$REPO_RAW_MAIN_PREFIX"}"
+            else
+                separator='?'
+                case "$url" in
+                    *\?*) separator='&' ;;
+                esac
+                download_url="${url}${separator}ts=$(date +%s)"
+            fi
+            ;;
         https://raw.githubusercontent.com/*)
             separator='?'
             case "$url" in
