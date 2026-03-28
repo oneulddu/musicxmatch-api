@@ -37,11 +37,11 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 설치 스크립트가 자동으로:
 1. 로컬 서버 설치 및 자동 시작 설정 (`http://127.0.0.1:8092`)
 2. 서버 health check 및 CORS 헤더 검증
-3. ivLyrics addon-manager로 애드온을 설치할 수 있는 명령 안내 출력
+3. ivLyrics addon tracking과 같은 상태를 만드는 애드온 등록 명령 안내 출력
 
 ### 사용법
 
-1. 아래 addon-manager 명령으로 원하는 provider addon 설치
+1. 아래 애드온 등록 명령으로 원하는 provider addon 설치
 2. ivLyrics 설정에서 원하는 provider 활성화
 3. Spotify에서 음악 재생
 4. 가사가 자동으로 표시됨
@@ -99,7 +99,7 @@ IVLYRICS_MXM_LOG=/custom/path/server.log
 
 ### 애드온 설치
 
-애드온 설치와 업데이트는 `ivLyrics addon-manager`를 사용하는 것을 권장합니다. 개인 레포 raw URL을 등록하면 ivLyrics 쪽에서 계속 추적할 수 있습니다.
+애드온 설치와 업데이트는 ivLyrics가 쓰는 `addon_sources.json` + `manifest.json` 추적 상태를 유지하는 방식으로 진행하는 것을 권장합니다. Windows는 공식 `addon-manager.ps1`를 그대로 써도 되고, macOS/Linux는 기본 bash 3.2 호환 문제를 피하기 위해 같은 추적 상태를 만드는 호환 스크립트를 사용합니다.
 
 **Windows**
 ```powershell
@@ -117,15 +117,17 @@ $base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
 **macOS / Linux**
 ```bash
 base="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
-for p in MusicXMatch Deezer Bugs Genie; do
-    curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "$base/Addon_Lyrics_$p.js"
-done
+curl -fsSL "$base/addon-manager-compat.sh" | sh -s -- \
+  "$base/Addon_Lyrics_MusicXMatch.js" \
+  "$base/Addon_Lyrics_Deezer.js" \
+  "$base/Addon_Lyrics_Bugs.js" \
+  "$base/Addon_Lyrics_Genie.js"
 ```
 
 특정 provider 하나만 설치하려면 해당 URL만 넘기면 됩니다. 예:
 
 ```bash
-curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
+curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh | sh -s -- "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
 ```
 
 ---
@@ -134,7 +136,7 @@ curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "https://raw.
 
 ### ivLyrics 설정에서 (권장)
 - **Update server**: 서버만 업데이트
-- **Update all**: 서버 업데이트 후 ivLyrics addon-manager로 provider addon들을 다시 등록/갱신
+- **Update all**: 서버 업데이트 후 ivLyrics addon tracking 상태로 provider addon들을 다시 등록/갱신
 
 ### 수동 업데이트
 서버 업데이트:
@@ -167,9 +169,11 @@ $base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
 macOS / Linux
 ```bash
 base="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
-for p in MusicXMatch Deezer Bugs Genie; do
-    curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "$base/Addon_Lyrics_$p.js"
-done
+curl -fsSL "$base/addon-manager-compat.sh" | sh -s -- \
+  "$base/Addon_Lyrics_MusicXMatch.js" \
+  "$base/Addon_Lyrics_Deezer.js" \
+  "$base/Addon_Lyrics_Bugs.js" \
+  "$base/Addon_Lyrics_Genie.js"
 ```
 
 ---
@@ -188,7 +192,7 @@ iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/unins
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.sh | bash
 ```
 
-애드온 제거는 ivLyrics addon-manager 쪽에서 별도로 관리하세요.
+애드온 제거는 ivLyrics addon tracking 쪽에서 별도로 관리하세요.
 
 ---
 

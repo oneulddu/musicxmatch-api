@@ -3,7 +3,7 @@
  * @addon-type  lyrics
  * @id          deezer-provider
  * @name        Deezer Provider
- * @version     0.7.5
+ * @version     0.7.6
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -15,7 +15,7 @@
     "id": "deezer-provider",
     "name": "Deezer Provider",
     "backend": "deezer",
-    "version": "0.7.5",
+    "version": "0.7.6",
     "author": "oneulddu",
     "description": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
     "settingsTitle": "Lyrics bridge server",
@@ -507,7 +507,7 @@
                 ),
                 updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
                     React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'Update server refreshes only the local bridge server. Update all refreshes the server and re-registers all provider addons through ivLyrics addon-manager.'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'Update server refreshes only the local bridge server. Update all refreshes the server and re-registers all provider addons in ivLyrics addon tracking.'),
                     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
                         React.createElement('button', {
                             style: button,
@@ -526,7 +526,7 @@
                     ),
                     React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Server only'),
                     React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\n')),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all (addon-manager)'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all (addon tracking)'),
                     React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\n'))
                 ),
                 versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },

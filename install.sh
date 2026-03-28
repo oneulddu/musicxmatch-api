@@ -112,8 +112,10 @@ echo ""
 echo "✓ Installation complete!"
 echo "Server running at $SERVER_URL"
 echo ""
-echo "Install addons with ivLyrics addon-manager:"
+addon_install_command='curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh | sh -s --'
 for addon_url in "${ADDON_URLS[@]}"; do
-    echo "  curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- \"$addon_url\""
+    addon_install_command="$addon_install_command \"$addon_url\""
 done
+echo "Install addons with ivLyrics addon tracking:"
+echo "  $addon_install_command"
 echo ""

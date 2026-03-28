@@ -864,14 +864,24 @@ fn update_all_command_lines() -> Vec<String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let mut commands = vec![
+        let commands = vec![
             "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string(),
+            unix_addon_sync_command(),
         ];
-        commands.extend(ADDON_URLS.into_iter().map(|url| {
-            format!("curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- \"{url}\"")
-        }));
         commands
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unix_addon_sync_command() -> String {
+    let args = ADDON_URLS
+        .iter()
+        .map(|url| format!("\"{url}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh?ts=$(date +%s)\" | sh -s -- {args}"
+    )
 }
 
 fn spawn_update_process(include_addon: bool) -> Result<(), String> {
