@@ -14,6 +14,36 @@ $StartupDir = [Environment]::GetFolderPath("Startup")
 $StartupScript = Join-Path $StartupDir "ivLyrics-MusicXMatch.cmd"
 $PreferredAutoStartMode = if ($env:IVLYRICS_WINDOWS_AUTOSTART) { $env:IVLYRICS_WINDOWS_AUTOSTART.Trim().ToLowerInvariant() } else { "startup-folder" }
 $SkipAddons = $env:IVLYRICS_SKIP_ADDONS -eq "1"
+$DownloadRetries = 3
+
+function Stop-SpotifyIfRunning {
+    $spotifyProcesses = Get-Process -Name "Spotify" -ErrorAction SilentlyContinue
+    if ($spotifyProcesses) {
+        Write-Host "Spotify is running. Closing it before spicetify apply..." -ForegroundColor DarkYellow
+        $spotifyProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+}
+
+function Invoke-AddonDownloadWithRetry {
+    param (
+        [string]$Uri,
+        [string]$OutFile
+    )
+
+    for ($attempt = 1; $attempt -le $DownloadRetries; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -ge $DownloadRetries) {
+                throw
+            }
+            Write-Host "Retrying addon download ($attempt/$DownloadRetries)..." -ForegroundColor DarkYellow
+            Start-Sleep -Seconds 1
+        }
+    }
+}
 
 function Install-Addons {
     param (
@@ -32,7 +62,7 @@ function Install-Addons {
     foreach ($AddonName in $AddonNames) {
         $AddonPath = Join-Path $ExtensionsDir $AddonName
         $AddonUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$AddonName"
-        Invoke-WebRequest -Uri $AddonUrl -OutFile $AddonPath
+        Invoke-AddonDownloadWithRetry -Uri $AddonUrl -OutFile $AddonPath
 
         if ($ExtensionList -notcontains $AddonName) {
             spicetify config extensions $AddonName | Out-Null
@@ -40,6 +70,7 @@ function Install-Addons {
         }
     }
 
+    Stop-SpotifyIfRunning
     spicetify apply
 }
 
@@ -114,7 +145,7 @@ if ($SkipAddons) {
 } else {
     $Spicetify = Get-Command spicetify -ErrorAction SilentlyContinue
     if (-not $Spicetify) {
-    Write-Warning "spicetify is not installed or not in PATH. Skipping addon registration."
+    Write-Warning "spicetify is not installed or not in PATH. Server installation completed, but addon registration was skipped."
     } else {
         Install-Addons -AddonNames $AddonNames -ExtensionsDir $ExtensionsDir
     }

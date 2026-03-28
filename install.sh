@@ -13,13 +13,36 @@ BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
 SERVER_URL="http://127.0.0.1:8092"
 RUNTIME_PATH="$HOME/.cargo/bin:$HOME/.spicetify:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SKIP_ADDONS="${IVLYRICS_SKIP_ADDONS:-0}"
+DOWNLOAD_RETRIES=3
+
+close_spotify_if_running() {
+    if pgrep -x "Spotify" >/dev/null 2>&1 || pgrep -x "spotify" >/dev/null 2>&1; then
+        echo "Spotify is running. Closing it before spicetify apply..."
+        pkill -x "Spotify" >/dev/null 2>&1 || true
+        pkill -x "spotify" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+}
 
 download_addon() {
     local addon_name="$1"
     local addon_path="$EXTENSIONS_DIR/$addon_name"
     local addon_url="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$addon_name"
+    local attempt=1
 
-    curl -fsSL "$addon_url" -o "$addon_path"
+    while [[ $attempt -le $DOWNLOAD_RETRIES ]]; do
+        if curl -fsSL "$addon_url" -o "$addon_path"; then
+            return 0
+        fi
+
+        if [[ $attempt -lt $DOWNLOAD_RETRIES ]]; then
+            echo "Retrying addon download for $addon_name ($attempt/$DOWNLOAD_RETRIES)..."
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 1
 }
 
 register_addon() {
@@ -40,6 +63,7 @@ install_addons() {
         register_addon "$addon_name"
     done
 
+    close_spotify_if_running
     spicetify apply
 }
 
@@ -110,7 +134,7 @@ echo "[5/7] Installing ivLyrics addons..."
 if [[ "$SKIP_ADDONS" == "1" ]]; then
     echo "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration."
 elif ! command -v spicetify >/dev/null 2>&1; then
-    echo "spicetify is not installed or not in PATH. Skipping addon registration."
+    echo "spicetify is not installed or not in PATH. Server installation completed, but addon registration was skipped."
 else
     install_addons
 fi
