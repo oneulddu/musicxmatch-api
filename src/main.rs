@@ -855,11 +855,14 @@ fn update_all_command_lines() -> Vec<String> {
         let mut commands = vec![
             "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string(),
         ];
-        commands.extend(ADDON_URLS.into_iter().map(|url| {
-            format!(
-                "& ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url \"{url}\""
-            )
-        }));
+        let joined_urls = ADDON_URLS
+            .iter()
+            .map(|url| format!("\"{url}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        commands.push(format!(
+            "& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))).Content)) {joined_urls}"
+        ));
         commands
     }
     #[cfg(not(target_os = "windows"))]

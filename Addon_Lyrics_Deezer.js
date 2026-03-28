@@ -3,7 +3,7 @@
  * @addon-type  lyrics
  * @id          deezer-provider
  * @name        Deezer Provider
- * @version     0.7.6
+ * @version     0.7.7
  * @author      oneulddu
  * @generated   scripts/generate_addons.js
  */
@@ -15,7 +15,7 @@
     "id": "deezer-provider",
     "name": "Deezer Provider",
     "backend": "deezer",
-    "version": "0.7.6",
+    "version": "0.7.7",
     "author": "oneulddu",
     "description": "Fetches synced or plain lyrics from Deezer through the local bridge server.",
     "settingsTitle": "Lyrics bridge server",

@@ -67,7 +67,7 @@ if ($PreferredAutoStartMode -eq "scheduled-task") {
     Install-StartupFallback -RunnerScriptPath $RunnerScript -StartupScriptPath $StartupScript
 }
 
-Write-Host "[5/6] Starting server..." -ForegroundColor Yellow
+Write-Host "[5/7] Starting server..." -ForegroundColor Yellow
 if ($AutoStartMode -eq "scheduled-task") {
     Start-ScheduledTask -TaskName $TaskName
 } else {
@@ -75,7 +75,7 @@ if ($AutoStartMode -eq "scheduled-task") {
 }
 Start-Sleep -Seconds 2
 
-Write-Host "[6/6] Verifying health and CORS..." -ForegroundColor Yellow
+Write-Host "[6/7] Verifying health and CORS..." -ForegroundColor Yellow
 $Response = Invoke-WebRequest -Uri "$ServerUrl/health" -UseBasicParsing
 if ($Response.StatusCode -ne 200) {
     throw "Server health check failed: $ServerUrl/health"
@@ -84,13 +84,27 @@ if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
     throw "CORS header check failed: Access-Control-Allow-Origin header missing"
 }
 
+Write-Host "[7/7] Registering addons..." -ForegroundColor Yellow
+if (Get-Command spicetify -ErrorAction SilentlyContinue) {
+    try {
+        $CompatUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))"
+        $CompatScript = [scriptblock]::Create((iwr -useb $CompatUrl).Content)
+        & $CompatScript @AddonUrls
+        Write-Host "Addons registered successfully." -ForegroundColor Green
+    } catch {
+        Write-Warning "Addon registration failed. Server install succeeded, but addon registration needs manual retry."
+        $JoinedUrls = ($AddonUrls | ForEach-Object { "`"$($_)`"" }) -join " "
+        Write-Host "& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1).Content)) $JoinedUrls"
+    }
+} else {
+    Write-Warning "spicetify was not found, so addon registration was skipped."
+    Write-Host "Run the following after installing/configuring spicetify:"
+    $JoinedUrls = ($AddonUrls | ForEach-Object { "`"$($_)`"" }) -join " "
+    Write-Host "& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1).Content)) $JoinedUrls"
+}
+
 Write-Host ""
 Write-Host "✓ Installation complete!" -ForegroundColor Green
 Write-Host "Server running at $ServerUrl"
 Write-Host "Auto-start mode: $AutoStartMode"
-Write-Host ""
-Write-Host "Install addons with ivLyrics addon-manager:"
-foreach ($AddonUrl in $AddonUrls) {
-    Write-Host "& ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url `"$AddonUrl`""
-}
 Write-Host ""

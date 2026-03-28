@@ -81,7 +81,7 @@ EOF
     systemctl --user enable ivlyrics-musicxmatch
 fi
 
-echo "[5/6] Starting server..."
+echo "[5/7] Starting server..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     LAUNCHD_DOMAIN="gui/$(id -u)"
     LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
@@ -96,7 +96,7 @@ fi
 
 sleep 2
 
-echo "[6/6] Verifying health and CORS..."
+echo "[6/7] Verifying health and CORS..."
 HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
 if [[ -z "$HEALTH_HEADERS" ]]; then
     echo "Server health check failed: $SERVER_URL/health"
@@ -108,14 +108,23 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
     exit 1
 }
 
+echo "[7/7] Registering addons..."
+if command -v spicetify >/dev/null 2>&1; then
+    COMPAT_URL="$RAW_BASE_URL/addon-manager-compat.sh?ts=$(date +%s)"
+    if curl -fsSL "$COMPAT_URL" | sh -s -- "${ADDON_URLS[@]}"; then
+        echo "Addons registered successfully."
+    else
+        echo "Addon registration failed. Server install succeeded, but addon registration needs manual retry."
+        echo "Manual command:"
+        echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" | sh -s -- \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
+    fi
+else
+    echo "spicetify was not found, so addon registration was skipped."
+    echo "Run this after installing/configuring spicetify:"
+    echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" | sh -s -- \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
+fi
+
 echo ""
 echo "✓ Installation complete!"
 echo "Server running at $SERVER_URL"
-echo ""
-addon_install_command='curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh | sh -s --'
-for addon_url in "${ADDON_URLS[@]}"; do
-    addon_install_command="$addon_install_command \"$addon_url\""
-done
-echo "Install addons with ivLyrics addon tracking:"
-echo "  $addon_install_command"
 echo ""

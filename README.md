@@ -37,14 +37,14 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 설치 스크립트가 자동으로:
 1. 로컬 서버 설치 및 자동 시작 설정 (`http://127.0.0.1:8092`)
 2. 서버 health check 및 CORS 헤더 검증
-3. ivLyrics addon tracking과 같은 상태를 만드는 애드온 등록 명령 안내 출력
+3. provider addon 4개를 자동으로 등록
+4. `spicetify apply`까지 반영
 
 ### 사용법
 
-1. 아래 애드온 등록 명령으로 원하는 provider addon 설치
-2. ivLyrics 설정에서 원하는 provider 활성화
-3. Spotify에서 음악 재생
-4. 가사가 자동으로 표시됨
+1. ivLyrics 설정에서 원하는 provider 활성화
+2. Spotify에서 음악 재생
+3. 가사가 자동으로 표시됨
 
 **Deezer 사용 시**: ivLyrics 설정에서 Deezer ARL 쿠키 입력 필요 (아래 참조)
 
@@ -99,19 +99,16 @@ IVLYRICS_MXM_LOG=/custom/path/server.log
 
 ### 애드온 설치
 
-애드온 설치와 업데이트는 ivLyrics가 쓰는 `addon_sources.json` + `manifest.json` 추적 상태를 유지하는 방식으로 진행하는 것을 권장합니다. Windows는 공식 `addon-manager.ps1`를 그대로 써도 되고, macOS/Linux는 기본 bash 3.2 호환 문제를 피하기 위해 같은 추적 상태를 만드는 호환 스크립트를 사용합니다.
+설치 스크립트가 기본적으로 애드온도 같이 등록합니다. 아래 명령은 수동 재등록이나 부분 설치가 필요할 때만 쓰면 됩니다. 애드온 등록은 ivLyrics가 쓰는 `addon_sources.json` + `manifest.json` 추적 상태를 유지하는 방식으로 진행됩니다. 자동 설치/업데이트에서는 확인 프롬프트 없이 같은 추적 상태를 만드는 호환 스크립트를 사용합니다.
 
 **Windows**
 ```powershell
 $base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
-@(
-    "$base/Addon_Lyrics_MusicXMatch.js",
-    "$base/Addon_Lyrics_Deezer.js",
-    "$base/Addon_Lyrics_Bugs.js",
-    "$base/Addon_Lyrics_Genie.js"
-) | ForEach-Object {
-    & ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url $_
-}
+& ([scriptblock]::Create((iwr -useb "$base/addon-manager-compat.ps1").Content)) `
+  "$base/Addon_Lyrics_MusicXMatch.js" `
+  "$base/Addon_Lyrics_Deezer.js" `
+  "$base/Addon_Lyrics_Bugs.js" `
+  "$base/Addon_Lyrics_Genie.js"
 ```
 
 **macOS / Linux**
@@ -156,14 +153,11 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 Windows
 ```powershell
 $base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
-@(
-    "$base/Addon_Lyrics_MusicXMatch.js",
-    "$base/Addon_Lyrics_Deezer.js",
-    "$base/Addon_Lyrics_Bugs.js",
-    "$base/Addon_Lyrics_Genie.js"
-) | ForEach-Object {
-    & ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url $_
-}
+& ([scriptblock]::Create((iwr -useb "$base/addon-manager-compat.ps1").Content)) `
+  "$base/Addon_Lyrics_MusicXMatch.js" `
+  "$base/Addon_Lyrics_Deezer.js" `
+  "$base/Addon_Lyrics_Bugs.js" `
+  "$base/Addon_Lyrics_Genie.js"
 ```
 
 macOS / Linux
