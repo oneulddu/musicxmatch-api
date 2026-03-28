@@ -5,67 +5,18 @@ echo "=== ivLyrics Lyrics Providers Installer ==="
 echo ""
 
 INSTALL_DIR="$HOME/.ivlyrics-musicxmatch"
-EXTENSIONS_DIR="$HOME/.config/spicetify/Extensions"
-ADDON_NAMES=("Addon_Lyrics_MusicXMatch.js" "Addon_Lyrics_Deezer.js" "Addon_Lyrics_Bugs.js" "Addon_Lyrics_Genie.js")
 SERVICE_LABEL="com.ivlyrics.musicxmatch"
 BIN_DIR="$HOME/.cargo/bin"
 BIN_PATH="$BIN_DIR/ivlyrics-musicxmatch-server"
 SERVER_URL="http://127.0.0.1:8092"
 RUNTIME_PATH="$HOME/.cargo/bin:$HOME/.spicetify:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-SKIP_ADDONS="${IVLYRICS_SKIP_ADDONS:-0}"
-DOWNLOAD_RETRIES=3
-
-close_spotify_if_running() {
-    if pgrep -x "Spotify" >/dev/null 2>&1 || pgrep -x "spotify" >/dev/null 2>&1; then
-        echo "Spotify is running. Closing it before spicetify apply..."
-        pkill -x "Spotify" >/dev/null 2>&1 || true
-        pkill -x "spotify" >/dev/null 2>&1 || true
-        sleep 2
-    fi
-}
-
-download_addon() {
-    local addon_name="$1"
-    local addon_path="$EXTENSIONS_DIR/$addon_name"
-    local addon_url="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/$addon_name"
-    local attempt=1
-
-    while [[ $attempt -le $DOWNLOAD_RETRIES ]]; do
-        if curl -fsSL "$addon_url" -o "$addon_path"; then
-            return 0
-        fi
-
-        if [[ $attempt -lt $DOWNLOAD_RETRIES ]]; then
-            echo "Retrying addon download for $addon_name ($attempt/$DOWNLOAD_RETRIES)..."
-            sleep 1
-        fi
-        attempt=$((attempt + 1))
-    done
-
-    return 1
-}
-
-register_addon() {
-    local addon_name="$1"
-
-    if ! printf '%s\n' "$CURRENT_EXTENSIONS" | tr '|' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$addon_name"; then
-        spicetify config extensions "$addon_name"
-        CURRENT_EXTENSIONS="${CURRENT_EXTENSIONS}${CURRENT_EXTENSIONS:+ | }$addon_name"
-    fi
-}
-
-install_addons() {
-    mkdir -p "$EXTENSIONS_DIR"
-    CURRENT_EXTENSIONS="$(spicetify config extensions 2>/dev/null || true)"
-
-    for addon_name in "${ADDON_NAMES[@]}"; do
-        download_addon "$addon_name"
-        register_addon "$addon_name"
-    done
-
-    close_spotify_if_running
-    spicetify apply
-}
+RAW_BASE_URL="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
+ADDON_URLS=(
+    "$RAW_BASE_URL/Addon_Lyrics_MusicXMatch.js"
+    "$RAW_BASE_URL/Addon_Lyrics_Deezer.js"
+    "$RAW_BASE_URL/Addon_Lyrics_Bugs.js"
+    "$RAW_BASE_URL/Addon_Lyrics_Genie.js"
+)
 
 echo "[1/7] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
@@ -130,16 +81,7 @@ EOF
     systemctl --user enable ivlyrics-musicxmatch
 fi
 
-echo "[5/7] Installing ivLyrics addons..."
-if [[ "$SKIP_ADDONS" == "1" ]]; then
-    echo "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration."
-elif ! command -v spicetify >/dev/null 2>&1; then
-    echo "spicetify is not installed or not in PATH. Server installation completed, but addon registration was skipped."
-else
-    install_addons
-fi
-
-echo "[6/7] Starting server..."
+echo "[5/6] Starting server..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     LAUNCHD_DOMAIN="gui/$(id -u)"
     LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
@@ -154,7 +96,7 @@ fi
 
 sleep 2
 
-echo "[7/7] Verifying health and CORS..."
+echo "[6/6] Verifying health and CORS..."
 HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
 if [[ -z "$HEALTH_HEADERS" ]]; then
     echo "Server health check failed: $SERVER_URL/health"
@@ -169,5 +111,9 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
 echo ""
 echo "✓ Installation complete!"
 echo "Server running at $SERVER_URL"
-echo "Addon paths: $EXTENSIONS_DIR/${ADDON_NAMES[0]}, $EXTENSIONS_DIR/${ADDON_NAMES[1]}, $EXTENSIONS_DIR/${ADDON_NAMES[2]}, $EXTENSIONS_DIR/${ADDON_NAMES[3]}"
+echo ""
+echo "Install addons with ivLyrics addon-manager:"
+for addon_url in "${ADDON_URLS[@]}"; do
+    echo "  curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- \"$addon_url\""
+done
 echo ""

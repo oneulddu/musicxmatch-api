@@ -512,7 +512,7 @@ function buildAddon(provider) {
                 ),
                 updateNeeded && React.createElement('div', { style: { marginTop: 14 } },
                     React.createElement('div', { style: { color: '#f59e0b', fontSize: 12, fontWeight: 700, marginBottom: 8 } }, 'Update available'),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'You can update just the server, or update the server, all addon files, and run spicetify apply together.'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.8 } }, 'Update server refreshes only the local bridge server. Update all refreshes the server and re-registers all provider addons through ivLyrics addon-manager.'),
                     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 } },
                         React.createElement('button', {
                             style: button,
@@ -526,12 +526,12 @@ function buildAddon(provider) {
                         }, updateAllStatus === 'updating' ? 'Updating all...' : 'Update all'),
                         updateStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Server update scheduled'),
                         updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update server failed'),
-                        updateAllStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'All scheduled'),
+                        updateAllStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'All updates scheduled'),
                         updateAllStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update all failed')
                     ),
                     React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Server only'),
                     React.createElement('div', { style: commandBox }, (versionStatus.serverCommand || []).join('\\n')),
-                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all'),
+                    React.createElement('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 10 } }, 'Update all (addon-manager)'),
                     React.createElement('div', { style: commandBox }, (versionStatus.allCommand || []).join('\\n'))
                 ),
                 versionStatus?.error && React.createElement('div', { style: { color: '#e91429', fontSize: 12, marginTop: 14 } },

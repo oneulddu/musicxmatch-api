@@ -36,16 +36,15 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 
 설치 스크립트가 자동으로:
 1. 로컬 서버 설치 및 자동 시작 설정 (`http://127.0.0.1:8092`)
-2. Spicetify Extensions에 4개 애드온 파일 배치
-3. 기존 extension 목록 유지하며 자동 등록
-4. `spicetify apply` 실행
-5. 서버 health check 및 CORS 헤더 검증
+2. 서버 health check 및 CORS 헤더 검증
+3. ivLyrics addon-manager로 애드온을 설치할 수 있는 명령 안내 출력
 
 ### 사용법
 
-1. ivLyrics 설정에서 원하는 provider 활성화
-2. Spotify에서 음악 재생
-3. 가사가 자동으로 표시됨
+1. 아래 addon-manager 명령으로 원하는 provider addon 설치
+2. ivLyrics 설정에서 원하는 provider 활성화
+3. Spotify에서 음악 재생
+4. 가사가 자동으로 표시됨
 
 **Deezer 사용 시**: ivLyrics 설정에서 Deezer ARL 쿠키 입력 필요 (아래 참조)
 
@@ -98,31 +97,35 @@ DEEZER_ARL=your_cookie
 IVLYRICS_MXM_LOG=/custom/path/server.log
 ```
 
-### 수동 애드온 설치
+### 애드온 설치
 
-자동 설치 스크립트를 사용하지 않는 경우:
+애드온 설치와 업데이트는 `ivLyrics addon-manager`를 사용하는 것을 권장합니다. 개인 레포 raw URL을 등록하면 ivLyrics 쪽에서 계속 추적할 수 있습니다.
 
 **Windows**
 ```powershell
-$ext = "$env:APPDATA\spicetify\Extensions"
-New-Item -ItemType Directory -Force $ext | Out-Null
 $base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
-@("MusicXMatch", "Deezer", "Bugs", "Genie") | ForEach-Object {
-    Invoke-WebRequest "$base/Addon_Lyrics_$_.js" -OutFile "$ext\Addon_Lyrics_$_.js"
-    spicetify config extensions "Addon_Lyrics_$_.js"
+@(
+    "$base/Addon_Lyrics_MusicXMatch.js",
+    "$base/Addon_Lyrics_Deezer.js",
+    "$base/Addon_Lyrics_Bugs.js",
+    "$base/Addon_Lyrics_Genie.js"
+) | ForEach-Object {
+    & ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url $_
 }
-spicetify apply
 ```
 
 **macOS / Linux**
 ```bash
-mkdir -p ~/.config/spicetify/Extensions
 base="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
 for p in MusicXMatch Deezer Bugs Genie; do
-    curl -fsSL "$base/Addon_Lyrics_$p.js" -o ~/.config/spicetify/Extensions/Addon_Lyrics_$p.js
-    spicetify config extensions "Addon_Lyrics_$p.js"
+    curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "$base/Addon_Lyrics_$p.js"
 done
-spicetify apply
+```
+
+특정 provider 하나만 설치하려면 해당 URL만 넘기면 됩니다. 예:
+
+```bash
+curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
 ```
 
 ---
@@ -131,10 +134,10 @@ spicetify apply
 
 ### ivLyrics 설정에서 (권장)
 - **Update server**: 서버만 업데이트
-- **Update all**: 서버 + 애드온 + spicetify apply
+- **Update all**: 서버 업데이트 후 ivLyrics addon-manager로 provider addon들을 다시 등록/갱신
 
 ### 수동 업데이트
-설치 스크립트 재실행:
+서버 업데이트:
 
 **Windows**
 ```powershell
@@ -146,6 +149,29 @@ iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash
 ```
 
+애드온 업데이트:
+
+Windows
+```powershell
+$base = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
+@(
+    "$base/Addon_Lyrics_MusicXMatch.js",
+    "$base/Addon_Lyrics_Deezer.js",
+    "$base/Addon_Lyrics_Bugs.js",
+    "$base/Addon_Lyrics_Genie.js"
+) | ForEach-Object {
+    & ([scriptblock]::Create((iwr -useb https://ivlis.kr/ivLyrics/addon-manager.ps1).Content)) -url $_
+}
+```
+
+macOS / Linux
+```bash
+base="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main"
+for p in MusicXMatch Deezer Bugs Genie; do
+    curl -fsSL https://ivlis.kr/ivLyrics/addon-manager.sh | bash -s -- "$base/Addon_Lyrics_$p.js"
+done
+```
+
 ---
 
 ## 제거
@@ -154,27 +180,15 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 ```powershell
 # 서버 제거
 iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.ps1" | iex
-
-# 애드온 제거
-@("MusicXMatch", "Deezer", "Bugs", "Genie") | ForEach-Object {
-    Remove-Item "$env:APPDATA\spicetify\Extensions\Addon_Lyrics_$_.js" -Force -ErrorAction SilentlyContinue
-    spicetify config extensions "Addon_Lyrics_$_.js-"
-}
-spicetify apply
 ```
 
 **macOS / Linux**
 ```bash
 # 서버 제거
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/uninstall.sh | bash
-
-# 애드온 제거
-for p in MusicXMatch Deezer Bugs Genie; do
-    rm -f ~/.config/spicetify/Extensions/Addon_Lyrics_$p.js
-    spicetify config extensions "Addon_Lyrics_$p.js-"
-done
-spicetify apply
 ```
+
+애드온 제거는 ivLyrics addon-manager 쪽에서 별도로 관리하세요.
 
 ---
 
