@@ -832,13 +832,13 @@ fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         vec![
-            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string(),
+            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string(),
         ]
     }
     #[cfg(not(target_os = "windows"))]
     {
         vec![
-            "export IVLYRICS_SKIP_ADDONS=1; curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string(),
+            "export IVLYRICS_SKIP_ADDONS=1; curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string(),
         ]
     }
 }
@@ -846,11 +846,11 @@ fn update_server_command_lines() -> Vec<String> {
 fn update_all_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        vec!["iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()]
+        vec!["iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string()]
     }
     #[cfg(not(target_os = "windows"))]
     {
-        vec!["curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh | bash".to_string()]
+        vec!["curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string()]
     }
 }
 
@@ -858,9 +858,9 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let install_command = if include_addon {
-            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()
+            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string()
         } else {
-            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1\" | iex".to_string()
+            "$env:IVLYRICS_SKIP_ADDONS='1'; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string()
         };
         let command = format!(
             "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; {}'",
@@ -905,13 +905,13 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
 
         if include_addon {
             script_lines.push(
-                "curl -fsSL 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh' | bash"
+                "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash"
                     .to_string(),
             );
         } else {
             script_lines.push("export IVLYRICS_SKIP_ADDONS=1".to_string());
             script_lines.push(
-                "curl -fsSL 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh' | bash"
+                "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash"
                     .to_string(),
             );
         }
