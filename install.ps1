@@ -68,24 +68,7 @@ if ($PreferredAutoStartMode -eq "scheduled-task") {
     Install-StartupFallback -RunnerScriptPath $RunnerScript -StartupScriptPath $StartupScript
 }
 
-Write-Host "[5/7] Starting server..." -ForegroundColor Yellow
-if ($AutoStartMode -eq "scheduled-task") {
-    Start-ScheduledTask -TaskName $TaskName
-} else {
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunnerScript -WorkingDirectory $InstallDir | Out-Null
-}
-Start-Sleep -Seconds 2
-
-Write-Host "[6/7] Verifying health and CORS..." -ForegroundColor Yellow
-$Response = Invoke-WebRequest -Uri "$ServerUrl/health" -UseBasicParsing
-if ($Response.StatusCode -ne 200) {
-    throw "Server health check failed: $ServerUrl/health"
-}
-if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
-    throw "CORS header check failed: Access-Control-Allow-Origin header missing"
-}
-
-Write-Host "[7/7] Registering addons..." -ForegroundColor Yellow
+Write-Host "[5/7] Registering addons..." -ForegroundColor Yellow
 if ($SkipAddons) {
     Write-Host "Addon registration skipped by IVLYRICS_SKIP_ADDONS=1."
 } elseif (Get-Command spicetify -ErrorAction SilentlyContinue) {
@@ -104,6 +87,23 @@ if ($SkipAddons) {
     Write-Host "Run the following after installing/configuring spicetify:"
     $JoinedUrls = ($AddonUrls | ForEach-Object { "`"$($_)`"" }) -join " "
     Write-Host "& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1).Content)) $JoinedUrls"
+}
+
+Write-Host "[6/7] Starting server..." -ForegroundColor Yellow
+if ($AutoStartMode -eq "scheduled-task") {
+    Start-ScheduledTask -TaskName $TaskName
+} else {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunnerScript -WorkingDirectory $InstallDir | Out-Null
+}
+Start-Sleep -Seconds 2
+
+Write-Host "[7/7] Verifying health and CORS..." -ForegroundColor Yellow
+$Response = Invoke-WebRequest -Uri "$ServerUrl/health" -UseBasicParsing
+if ($Response.StatusCode -ne 200) {
+    throw "Server health check failed: $ServerUrl/health"
+}
+if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
+    throw "CORS header check failed: Access-Control-Allow-Origin header missing"
 }
 
 Write-Host ""

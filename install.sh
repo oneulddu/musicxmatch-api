@@ -82,34 +82,7 @@ EOF
     systemctl --user enable ivlyrics-musicxmatch
 fi
 
-echo "[5/7] Starting server..."
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    LAUNCHD_DOMAIN="gui/$(id -u)"
-    LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
-    if launchctl print "$LAUNCHD_SERVICE" >/dev/null 2>&1; then
-        launchctl kickstart -k "$LAUNCHD_SERVICE"
-    else
-        launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
-    fi
-else
-    systemctl --user restart ivlyrics-musicxmatch
-fi
-
-sleep 2
-
-echo "[6/7] Verifying health and CORS..."
-HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
-if [[ -z "$HEALTH_HEADERS" ]]; then
-    echo "Server health check failed: $SERVER_URL/health"
-    exit 1
-fi
-
-echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*$' || {
-    echo "CORS header check failed: access-control-allow-origin: * not found"
-    exit 1
-}
-
-echo "[7/7] Registering addons..."
+echo "[5/7] Registering addons..."
 if [[ "$SKIP_ADDONS" == "1" ]]; then
     echo "Addon registration skipped by IVLYRICS_SKIP_ADDONS=1."
 elif command -v spicetify >/dev/null 2>&1; then
@@ -126,6 +99,33 @@ else
     echo "Run this after installing/configuring spicetify:"
     echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" | sh -s -- \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
 fi
+
+echo "[6/7] Starting server..."
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    LAUNCHD_DOMAIN="gui/$(id -u)"
+    LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
+    if launchctl print "$LAUNCHD_SERVICE" >/dev/null 2>&1; then
+        launchctl kickstart -k "$LAUNCHD_SERVICE"
+    else
+        launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
+    fi
+else
+    systemctl --user restart ivlyrics-musicxmatch
+fi
+
+sleep 2
+
+echo "[7/7] Verifying health and CORS..."
+HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
+if [[ -z "$HEALTH_HEADERS" ]]; then
+    echo "Server health check failed: $SERVER_URL/health"
+    exit 1
+fi
+
+echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*$' || {
+    echo "CORS header check failed: access-control-allow-origin: * not found"
+    exit 1
+}
 
 echo ""
 echo "✓ Installation complete!"
