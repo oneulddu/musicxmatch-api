@@ -24,7 +24,32 @@ fi
 mkdir -p "$ADDON_DIR" "$SOURCES_DIR"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ivlyrics-addon-compat.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+spotify_was_running=0
+
+stop_spotify_if_running() {
+    if pgrep -x "Spotify" >/dev/null 2>&1; then
+        spotify_was_running=1
+        if command -v osascript >/dev/null 2>&1; then
+            osascript -e 'tell application "Spotify" to quit' >/dev/null 2>&1 || true
+        fi
+        pkill -x "Spotify" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+}
+
+restart_spotify_if_needed() {
+    if [ "$spotify_was_running" -eq 1 ]; then
+        open -a Spotify >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup() {
+    restart_spotify_if_needed
+    rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT INT TERM
 
 for url in "$@"; do
     filename=$(basename "${url%%\?*}")
@@ -81,6 +106,7 @@ for url in urls:
 PY
 
 if command -v spicetify >/dev/null 2>&1; then
+    stop_spotify_if_running
     spicetify apply
 else
     echo "spicetify not found; addon files were registered but apply was skipped." >&2

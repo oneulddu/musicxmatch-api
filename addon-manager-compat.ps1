@@ -7,6 +7,8 @@ $addonDir = "$env:LOCALAPPDATA\spicetify\CustomApps\ivLyrics"
 $sourcesDir = "$env:LOCALAPPDATA\spicetify\ivLyrics"
 $manifestPath = Join-Path $addonDir "manifest.json"
 $sourcesPath = Join-Path $sourcesDir "addon_sources.json"
+$spotifyWasRunning = $false
+$spotifyPath = $null
 
 if (-not (Test-Path $manifestPath)) {
     throw "ivLyrics manifest not found at $manifestPath"
@@ -14,6 +16,16 @@ if (-not (Test-Path $manifestPath)) {
 
 New-Item -ItemType Directory -Force -Path $addonDir | Out-Null
 New-Item -ItemType Directory -Force -Path $sourcesDir | Out-Null
+
+try {
+    $spotifyProcess = Get-Process -Name Spotify -ErrorAction Stop | Select-Object -First 1
+    $spotifyWasRunning = $true
+    $spotifyPath = $spotifyProcess.Path
+    Stop-Process -Id $spotifyProcess.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+} catch {
+    $spotifyWasRunning = $false
+}
 
 $sources = @{}
 if (Test-Path $sourcesPath) {
@@ -58,6 +70,13 @@ foreach ($url in $Urls) {
 
 if (Get-Command spicetify -ErrorAction SilentlyContinue) {
     spicetify apply
+    if ($spotifyWasRunning) {
+        if ($spotifyPath -and (Test-Path $spotifyPath)) {
+            Start-Process -FilePath $spotifyPath | Out-Null
+        } else {
+            Start-Process "spotify" | Out-Null
+        }
+    }
 } else {
     Write-Warning "spicetify not found; addon files were registered but apply was skipped."
 }
