@@ -62,6 +62,8 @@ cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyri
 echo "[4/7] Setting up auto-start..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+    LAUNCHD_DOMAIN="gui/$(id -u)"
+    LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,8 +89,11 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 </dict>
 </plist>
 EOF
-    launchctl unload "$PLIST" >/dev/null 2>&1 || true
-    launchctl load "$PLIST"
+    if launchctl print "$LAUNCHD_SERVICE" >/dev/null 2>&1; then
+        launchctl kickstart -k "$LAUNCHD_SERVICE"
+    else
+        launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
+    fi
 else
     SERVICE_FILE="$HOME/.config/systemd/user/ivlyrics-musicxmatch.service"
     mkdir -p "$HOME/.config/systemd/user"
