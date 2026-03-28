@@ -52,7 +52,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 for url in "$@"; do
-    filename=$(basename "${url%%\?*}")
+    clean_url="${url%%\?*}"
+    filename=$(basename "$clean_url")
+    download_url="$url"
     case "$filename" in
         *.js) ;;
         *)
@@ -61,7 +63,17 @@ for url in "$@"; do
             ;;
     esac
 
-    curl -fsSL "$url" -o "$TMP_DIR/$filename"
+    case "$clean_url" in
+        https://raw.githubusercontent.com/*)
+            separator='?'
+            case "$url" in
+                *\?*) separator='&' ;;
+            esac
+            download_url="${url}${separator}ts=$(date +%s)"
+            ;;
+    esac
+
+    curl -fsSL "$download_url" -o "$TMP_DIR/$filename"
 done
 
 python3 - "$ADDON_DIR" "$SOURCES_PATH" "$MANIFEST_PATH" "$TMP_DIR" "$@" <<'PY'
@@ -88,11 +100,12 @@ if not isinstance(subfiles, list):
     subfiles = []
 
 for url in urls:
-    filename = url.split("?")[0].rsplit("/", 1)[-1]
+    clean_url = url.split("?")[0]
+    filename = clean_url.rsplit("/", 1)[-1]
     source_file = tmp_dir / filename
     target_file = addon_dir / filename
     target_file.write_text(source_file.read_text())
-    sources[filename] = url
+    sources[filename] = clean_url
     if filename not in subfiles:
         subfiles.append(filename)
 

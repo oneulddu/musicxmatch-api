@@ -45,13 +45,22 @@ if (-not $manifest.subfiles_extension) {
 foreach ($url in $Urls) {
     $cleanUrl = ($url -split '\?')[0]
     $fileName = [System.IO.Path]::GetFileName($cleanUrl)
+    $downloadUrl = $url
 
     if (-not $fileName -or -not $fileName.EndsWith('.js')) {
         throw "Invalid addon URL: $url"
     }
 
+    if ($cleanUrl.StartsWith('https://raw.githubusercontent.com/')) {
+        $separator = '?'
+        if ($url.Contains('?')) {
+            $separator = '&'
+        }
+        $downloadUrl = "$url$separator" + "ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    }
+
     $destination = Join-Path $addonDir $fileName
-    Invoke-WebRequest -Uri $cleanUrl -OutFile $destination -UseBasicParsing
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing
     $sources[$fileName] = $cleanUrl
 
     if ($manifest.subfiles_extension -notcontains $fileName) {
