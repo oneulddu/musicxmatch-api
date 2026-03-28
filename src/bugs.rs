@@ -2,10 +2,13 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::time::sleep;
 
 const SEARCH_URL: &str = "https://m.bugs.co.kr/api/getSearchList";
 const SYNCED_LYRICS_URL: &str = "https://music.bugs.co.kr/player/lyrics/T";
 const PLAIN_LYRICS_URL: &str = "https://music.bugs.co.kr/player/lyrics/N";
+const RETRY_ATTEMPTS: usize = 2;
+const RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Clone)]
 pub struct BugsClient {
@@ -34,6 +37,7 @@ pub struct BugsLyricsResult {
 pub enum BugsError {
     NotFound,
     NotAvailable,
+    Ratelimit,
     Provider(String),
 }
 
@@ -42,6 +46,7 @@ impl fmt::Display for BugsError {
         match self {
             Self::NotFound => write!(f, "No matching Bugs tracks found."),
             Self::NotAvailable => write!(f, "No Bugs lyrics are available for this track."),
+            Self::Ratelimit => write!(f, "Bugs rate limit reached."),
             Self::Provider(detail) => write!(f, "Bugs request failed: {detail}"),
         }
     }
@@ -69,23 +74,18 @@ impl BugsClient {
         }
 
         let response = self
-            .http
-            .get(SEARCH_URL)
-            .query(&[
-                ("type", "track"),
-                ("query", query.as_str()),
-                ("page", "1"),
-                ("size", "30"),
-            ])
-            .send()
-            .await
-            .map_err(|error| BugsError::Provider(error.to_string()))?;
+            .send_with_retry(|| {
+                self.http.get(SEARCH_URL).query(&[
+                    ("type", "track"),
+                    ("query", query.as_str()),
+                    ("page", "1"),
+                    ("size", "30"),
+                ])
+            })
+            .await?;
 
         if !response.status().is_success() {
-            return Err(BugsError::Provider(format!(
-                "search returned {}",
-                response.status()
-            )));
+            return Err(map_search_status(response.status()));
         }
 
         let payload = response
@@ -147,17 +147,11 @@ impl BugsClient {
             PLAIN_LYRICS_URL
         };
         let response = self
-            .http
-            .get(format!("{mode_url}/{track_id}"))
-            .send()
-            .await
-            .map_err(|error| BugsError::Provider(error.to_string()))?;
+            .send_with_retry(|| self.http.get(format!("{mode_url}/{track_id}")))
+            .await?;
 
         if !response.status().is_success() {
-            return Err(BugsError::Provider(format!(
-                "lyrics lookup returned {}",
-                response.status()
-            )));
+            return Err(map_lyrics_status(response.status()));
         }
 
         let payload = response
@@ -169,6 +163,62 @@ impl BugsClient {
             .lyrics
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()))
+    }
+
+    async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response, BugsError>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        for attempt in 0..RETRY_ATTEMPTS {
+            match build().send().await {
+                Ok(response) => {
+                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_status(response.status()) {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_error(&error) {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(BugsError::Provider(error.to_string()));
+                }
+            }
+        }
+
+        Err(BugsError::Provider(
+            "request retry loop exited unexpectedly".to_string(),
+        ))
+    }
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn is_retryable_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+fn map_search_status(status: reqwest::StatusCode) -> BugsError {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        BugsError::NotFound
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        BugsError::Ratelimit
+    } else {
+        BugsError::Provider(format!("search returned {status}"))
+    }
+}
+
+fn map_lyrics_status(status: reqwest::StatusCode) -> BugsError {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        BugsError::NotAvailable
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        BugsError::Ratelimit
+    } else {
+        BugsError::Provider(format!("lyrics lookup returned {status}"))
     }
 }
 

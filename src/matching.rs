@@ -17,6 +17,7 @@ const CLOSE_DURATION_BONUS: f32 = 10.0;
 const SMALL_DURATION_BONUS: f32 = 4.0;
 const MEDIUM_DURATION_PENALTY: f32 = -8.0;
 const LARGE_DURATION_PENALTY: f32 = -20.0;
+const EXACT_DURATION_MATCH_SECS: f32 = 2.5;
 
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut values = Vec::new();
@@ -221,6 +222,13 @@ pub fn duration_score(delta_secs: f32) -> f32 {
     }
 }
 
+pub fn exact_duration_match(duration_secs: Option<f32>, actual_duration_secs: Option<f32>) -> bool {
+    matches!(
+        (duration_secs, actual_duration_secs),
+        (Some(want), Some(actual)) if (actual - want).abs() <= EXACT_DURATION_MATCH_SECS
+    )
+}
+
 pub fn can_use_title_only_fallback(title: &str) -> bool {
     let simplified = simplify(title);
     let compact_len = simplified.chars().filter(|ch| !ch.is_whitespace()).count();
@@ -291,6 +299,7 @@ pub fn is_acceptable_bugs_match(
     title: &str,
     artist: &str,
     matched_by: &str,
+    duration_secs: Option<f32>,
 ) -> bool {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
@@ -305,13 +314,22 @@ pub fn is_acceptable_bugs_match(
     };
     let artist_contains = !want_artist.is_empty()
         && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+    let exact_duration = exact_duration_match(
+        duration_secs,
+        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+    );
 
     match matched_by {
         "search:title" => {
             title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+                && (
+                    want_artist.is_empty()
+                        || artist_similarity >= 0.35
+                        || artist_contains
+                        || exact_duration
+                )
         }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45 || (title_similarity >= 0.8 && exact_duration),
     }
 }
 
@@ -320,6 +338,7 @@ pub fn is_acceptable_genie_match(
     title: &str,
     artist: &str,
     matched_by: &str,
+    duration_secs: Option<f32>,
 ) -> bool {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
@@ -334,13 +353,22 @@ pub fn is_acceptable_genie_match(
     };
     let artist_contains = !want_artist.is_empty()
         && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+    let exact_duration = exact_duration_match(
+        duration_secs,
+        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+    );
 
     match matched_by {
         "search:title" => {
             title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
+                && (
+                    want_artist.is_empty()
+                        || artist_similarity >= 0.35
+                        || artist_contains
+                        || exact_duration
+                )
         }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
+        _ => title_similarity >= 0.45 || artist_similarity >= 0.45 || (title_similarity >= 0.8 && exact_duration),
     }
 }
 

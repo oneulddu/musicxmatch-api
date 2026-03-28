@@ -1595,7 +1595,7 @@ async fn resolve_bugs_tracks(
             .partial_cmp(&score_bugs_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by));
+    candidates.retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(BugsError::NotFound);
@@ -1656,7 +1656,7 @@ async fn resolve_genie_tracks(
             .partial_cmp(&score_genie_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_genie_match(track, title, artist, matched_by));
+    candidates.retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(GenieError::NotFound);
@@ -1739,6 +1739,10 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             StatusCode::NOT_FOUND,
             "No lyrics are available for this track".to_string(),
         ),
+        LyricsError::Bugs(BugsError::Ratelimit) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Bugs rate limit reached. Wait a minute and try again.".to_string(),
+        ),
         LyricsError::Bugs(BugsError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Bugs error: {detail}"))
         }
@@ -1748,6 +1752,10 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
         LyricsError::Genie(GenieError::NotAvailable) => (
             StatusCode::NOT_FOUND,
             "No lyrics are available for this track".to_string(),
+        ),
+        LyricsError::Genie(GenieError::Ratelimit) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Genie rate limit reached. Wait a minute and try again.".to_string(),
         ),
         LyricsError::Genie(GenieError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Genie error: {detail}"))

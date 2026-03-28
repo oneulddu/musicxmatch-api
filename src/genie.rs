@@ -3,9 +3,12 @@ use std::fmt;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::time::sleep;
 
 const SEARCH_URL: &str = "https://www.genie.co.kr/search/searchMain";
 const LYRICS_URL: &str = "https://dn.genie.co.kr/app/purchase/get_msl.asp";
+const RETRY_ATTEMPTS: usize = 2;
+const RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Clone)]
 pub struct GenieClient {
@@ -34,6 +37,7 @@ pub struct GenieLyricsResult {
 pub enum GenieError {
     NotFound,
     NotAvailable,
+    Ratelimit,
     Provider(String),
 }
 
@@ -42,6 +46,7 @@ impl fmt::Display for GenieError {
         match self {
             Self::NotFound => write!(f, "No matching Genie tracks found."),
             Self::NotAvailable => write!(f, "No Genie lyrics are available for this track."),
+            Self::Ratelimit => write!(f, "Genie rate limit reached."),
             Self::Provider(detail) => write!(f, "Genie request failed: {detail}"),
         }
     }
@@ -69,18 +74,11 @@ impl GenieClient {
         }
 
         let response = self
-            .http
-            .get(SEARCH_URL)
-            .query(&[("query", query.as_str())])
-            .send()
-            .await
-            .map_err(|error| GenieError::Provider(error.to_string()))?;
+            .send_with_retry(|| self.http.get(SEARCH_URL).query(&[("query", query.as_str())]))
+            .await?;
 
         if !response.status().is_success() {
-            return Err(GenieError::Provider(format!(
-                "search returned {}",
-                response.status()
-            )));
+            return Err(map_search_status(response.status()));
         }
 
         let body = response
@@ -96,22 +94,19 @@ impl GenieClient {
         track: &GenieTrack,
     ) -> Result<GenieLyricsResult, GenieError> {
         let response = self
-            .http
-            .get(LYRICS_URL)
-            .query(&[
-                ("path", "a"),
-                ("songid", &track.track_id.to_string()),
-            ])
-            .header(reqwest::header::REFERER, "https://www.genie.co.kr/")
-            .send()
-            .await
-            .map_err(|error| GenieError::Provider(error.to_string()))?;
+            .send_with_retry(|| {
+                self.http
+                    .get(LYRICS_URL)
+                    .query(&[
+                        ("path", "a"),
+                        ("songid", &track.track_id.to_string()),
+                    ])
+                    .header(reqwest::header::REFERER, "https://www.genie.co.kr/")
+            })
+            .await?;
 
         if !response.status().is_success() {
-            return Err(GenieError::Provider(format!(
-                "lyrics lookup returned {}",
-                response.status()
-            )));
+            return Err(map_lyrics_status(response.status()));
         }
 
         let body = response
@@ -139,6 +134,62 @@ impl GenieClient {
             lrc,
             text,
         })
+    }
+
+    async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response, GenieError>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        for attempt in 0..RETRY_ATTEMPTS {
+            match build().send().await {
+                Ok(response) => {
+                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_status(response.status()) {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_error(&error) {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        continue;
+                    }
+                    return Err(GenieError::Provider(error.to_string()));
+                }
+            }
+        }
+
+        Err(GenieError::Provider(
+            "request retry loop exited unexpectedly".to_string(),
+        ))
+    }
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn is_retryable_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+fn map_search_status(status: reqwest::StatusCode) -> GenieError {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        GenieError::NotFound
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        GenieError::Ratelimit
+    } else {
+        GenieError::Provider(format!("search returned {status}"))
+    }
+}
+
+fn map_lyrics_status(status: reqwest::StatusCode) -> GenieError {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        GenieError::NotAvailable
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        GenieError::Ratelimit
+    } else {
+        GenieError::Provider(format!("lyrics lookup returned {status}"))
     }
 }
 
