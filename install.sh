@@ -62,8 +62,6 @@ cargo install --git https://github.com/oneulddu/musicxmatch-api.git --bin ivlyri
 echo "[4/7] Setting up auto-start..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
-    LAUNCHD_DOMAIN="gui/$(id -u)"
-    LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,11 +87,6 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 </dict>
 </plist>
 EOF
-    if launchctl print "$LAUNCHD_SERVICE" >/dev/null 2>&1; then
-        launchctl kickstart -k "$LAUNCHD_SERVICE"
-    else
-        launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
-    fi
 else
     SERVICE_FILE="$HOME/.config/systemd/user/ivlyrics-musicxmatch.service"
     mkdir -p "$HOME/.config/systemd/user"
@@ -111,13 +104,33 @@ WantedBy=default.target
 EOF
     systemctl --user daemon-reload
     systemctl --user enable ivlyrics-musicxmatch
+fi
+
+echo "[5/7] Installing ivLyrics addons..."
+if [[ "$SKIP_ADDONS" == "1" ]]; then
+    echo "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration."
+elif ! command -v spicetify >/dev/null 2>&1; then
+    echo "spicetify is not installed or not in PATH. Skipping addon registration."
+else
+    install_addons
+fi
+
+echo "[6/7] Starting server..."
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    LAUNCHD_DOMAIN="gui/$(id -u)"
+    LAUNCHD_SERVICE="$LAUNCHD_DOMAIN/$SERVICE_LABEL"
+    if launchctl print "$LAUNCHD_SERVICE" >/dev/null 2>&1; then
+        launchctl kickstart -k "$LAUNCHD_SERVICE"
+    else
+        launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
+    fi
+else
     systemctl --user restart ivlyrics-musicxmatch
 fi
 
-echo "[5/7] Starting server..."
 sleep 2
 
-echo "[6/7] Verifying health and CORS..."
+echo "[7/7] Verifying health and CORS..."
 HEALTH_HEADERS="$(curl -fsSI "$SERVER_URL/health" || true)"
 if [[ -z "$HEALTH_HEADERS" ]]; then
     echo "Server health check failed: $SERVER_URL/health"
@@ -128,15 +141,6 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
     echo "CORS header check failed: access-control-allow-origin: * not found"
     exit 1
 }
-
-echo "[7/7] Installing ivLyrics addons..."
-if [[ "$SKIP_ADDONS" == "1" ]]; then
-    echo "IVLYRICS_SKIP_ADDONS=1 detected. Skipping addon registration."
-elif ! command -v spicetify >/dev/null 2>&1; then
-    echo "spicetify is not installed or not in PATH. Skipping addon registration."
-else
-    install_addons
-fi
 
 echo ""
 echo "✓ Installation complete!"

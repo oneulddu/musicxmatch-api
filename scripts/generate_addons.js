@@ -518,14 +518,14 @@ function buildAddon(provider) {
                             style: button,
                             onClick: runUpdate,
                             disabled: updateStatus === 'updating',
-                        }, updateStatus === 'updating' ? 'Updating...' : 'Update now'),
+                        }, updateStatus === 'updating' ? 'Updating server...' : 'Update server'),
                         React.createElement('button', {
                             style: button,
                             onClick: runUpdateAll,
                             disabled: updateAllStatus === 'updating',
                         }, updateAllStatus === 'updating' ? 'Updating all...' : 'Update all'),
-                        updateStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Scheduled'),
-                        updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Failed'),
+                        updateStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'Server update scheduled'),
+                        updateStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update server failed'),
                         updateAllStatus === 'scheduled' && React.createElement('span', { style: { color: '#1db954', fontSize: 12, fontWeight: 700 } }, 'All scheduled'),
                         updateAllStatus === 'failed' && React.createElement('span', { style: { color: '#e91429', fontSize: 12, fontWeight: 700 } }, 'Update all failed')
                     ),

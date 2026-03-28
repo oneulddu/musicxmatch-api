@@ -130,7 +130,7 @@ spicetify apply
 ## 업데이트
 
 ### ivLyrics 설정에서 (권장)
-- **Update now**: 서버만 업데이트
+- **Update server**: 서버만 업데이트
 - **Update all**: 서버 + 애드온 + spicetify apply
 
 ### 수동 업데이트
