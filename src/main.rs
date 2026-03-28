@@ -50,13 +50,6 @@ const BUGS_PROVIDER_NAME: &str = "bugs";
 const GENIE_PROVIDER_NAME: &str = "genie";
 const VERSION_INFO_URL: &str =
     "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
-const ADDON_URLS: [&str; 4] = [
-    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_MusicXMatch.js",
-    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Deezer.js",
-    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Bugs.js",
-    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js",
-];
-
 #[derive(Clone)]
 struct AppState {
     mxm: Musixmatch,
@@ -838,6 +831,21 @@ fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         vec![
+            "$env:IVLYRICS_SKIP_ADDONS = \"1\"; iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string(),
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![
+            "export IVLYRICS_SKIP_ADDONS=1; curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string(),
+        ]
+    }
+}
+
+fn update_all_command_lines() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
             "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string(),
         ]
     }
@@ -847,44 +855,6 @@ fn update_server_command_lines() -> Vec<String> {
             "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string(),
         ]
     }
-}
-
-fn update_all_command_lines() -> Vec<String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut commands = vec![
-            "iwr -useb \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))\" | iex".to_string(),
-        ];
-        let joined_urls = ADDON_URLS
-            .iter()
-            .map(|url| format!("\"{url}\""))
-            .collect::<Vec<_>>()
-            .join(" ");
-        commands.push(format!(
-            "& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))).Content)) {joined_urls}"
-        ));
-        commands
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let commands = vec![
-            "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)\" | bash".to_string(),
-            unix_addon_sync_command(),
-        ];
-        commands
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn unix_addon_sync_command() -> String {
-    let args = ADDON_URLS
-        .iter()
-        .map(|url| format!("\"{url}\""))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "curl -fsSL \"https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh?ts=$(date +%s)\" | sh -s -- {args}"
-    )
 }
 
 fn spawn_update_process(include_addon: bool) -> Result<(), String> {

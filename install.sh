@@ -17,6 +17,7 @@ ADDON_URLS=(
     "$RAW_BASE_URL/Addon_Lyrics_Bugs.js"
     "$RAW_BASE_URL/Addon_Lyrics_Genie.js"
 )
+SKIP_ADDONS="${IVLYRICS_SKIP_ADDONS:-0}"
 
 echo "[1/7] Creating installation directory..."
 mkdir -p "$INSTALL_DIR"
@@ -109,7 +110,9 @@ echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*
 }
 
 echo "[7/7] Registering addons..."
-if command -v spicetify >/dev/null 2>&1; then
+if [[ "$SKIP_ADDONS" == "1" ]]; then
+    echo "Addon registration skipped by IVLYRICS_SKIP_ADDONS=1."
+elif command -v spicetify >/dev/null 2>&1; then
     COMPAT_URL="$RAW_BASE_URL/addon-manager-compat.sh?ts=$(date +%s)"
     if curl -fsSL "$COMPAT_URL" | sh -s -- "${ADDON_URLS[@]}"; then
         echo "Addons registered successfully."

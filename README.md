@@ -133,7 +133,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon
 
 ### ivLyrics 설정에서 (권장)
 - **Update server**: 서버만 업데이트
-- **Update all**: 서버 업데이트 후 ivLyrics addon tracking 상태로 provider addon들을 다시 등록/갱신
+- **Update all**: 서버와 provider addon들을 함께 업데이트
 
 ### 수동 업데이트
 서버 업데이트:

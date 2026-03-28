@@ -18,6 +18,7 @@ $AddonUrls = @(
     "$RawBaseUrl/Addon_Lyrics_Bugs.js",
     "$RawBaseUrl/Addon_Lyrics_Genie.js"
 )
+$SkipAddons = $env:IVLYRICS_SKIP_ADDONS -eq "1"
 
 function Install-StartupFallback {
     param (
@@ -85,7 +86,9 @@ if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
 }
 
 Write-Host "[7/7] Registering addons..." -ForegroundColor Yellow
-if (Get-Command spicetify -ErrorAction SilentlyContinue) {
+if ($SkipAddons) {
+    Write-Host "Addon registration skipped by IVLYRICS_SKIP_ADDONS=1."
+} elseif (Get-Command spicetify -ErrorAction SilentlyContinue) {
     try {
         $CompatUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1?ts=$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))"
         $CompatScript = [scriptblock]::Create((iwr -useb $CompatUrl).Content)
