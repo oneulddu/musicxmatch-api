@@ -776,10 +776,6 @@ fn is_trusted_origin_str(origin: &str) -> bool {
         return true;
     }
 
-    if origin.eq_ignore_ascii_case("null") {
-        return true;
-    }
-
     let Ok(parsed) = Url::parse(origin) else {
         return false;
     };
@@ -2120,6 +2116,7 @@ mod tests {
         assert!(is_trusted_origin_str("spicetify://ivlyrics"));
         assert!(is_trusted_origin_str("https://xpui.app.spotify.com"));
         assert!(is_trusted_origin_str("http://127.0.0.1:8092"));
+        assert!(!is_trusted_origin_str("null"));
         assert!(!is_trusted_origin_str("https://example.com"));
     }
 
