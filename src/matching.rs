@@ -94,7 +94,7 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
         &track.track_name,
         &track.artist_name,
         duration_secs,
-        Some(track.track_length as f32 / 1000.0),
+        Some(track.track_length as f32),
     );
 
     if track.has_subtitles {
@@ -322,14 +322,16 @@ pub fn is_acceptable_bugs_match(
     match matched_by {
         "search:title" => {
             title_similarity >= 0.8
-                && (
-                    want_artist.is_empty()
-                        || artist_similarity >= 0.35
-                        || artist_contains
-                        || exact_duration
-                )
+                && (want_artist.is_empty()
+                    || artist_similarity >= 0.35
+                    || artist_contains
+                    || exact_duration)
         }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45 || (title_similarity >= 0.8 && exact_duration),
+        _ => {
+            title_similarity >= 0.45
+                || artist_similarity >= 0.45
+                || (title_similarity >= 0.8 && exact_duration)
+        }
     }
 }
 
@@ -361,14 +363,16 @@ pub fn is_acceptable_genie_match(
     match matched_by {
         "search:title" => {
             title_similarity >= 0.8
-                && (
-                    want_artist.is_empty()
-                        || artist_similarity >= 0.35
-                        || artist_contains
-                        || exact_duration
-                )
+                && (want_artist.is_empty()
+                    || artist_similarity >= 0.35
+                    || artist_contains
+                    || exact_duration)
         }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45 || (title_similarity >= 0.8 && exact_duration),
+        _ => {
+            title_similarity >= 0.45
+                || artist_similarity >= 0.45
+                || (title_similarity >= 0.8 && exact_duration)
+        }
     }
 }
 
