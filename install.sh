@@ -82,22 +82,46 @@ EOF
     systemctl --user enable ivlyrics-musicxmatch
 fi
 
+print_manual_addon_registration() {
+    echo "  addon_manager_script=\$(mktemp \"\${TMPDIR:-/tmp}/ivlyrics-addon-manager.XXXXXX\")"
+    echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" -o \"\$addon_manager_script\""
+    echo "  sh \"\$addon_manager_script\" \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
+    echo "  rm -f \"\$addon_manager_script\""
+}
+
+register_addons() {
+    local compat_url="$1"
+    local addon_manager_script
+
+    addon_manager_script="$(mktemp "${TMPDIR:-/tmp}/ivlyrics-addon-manager.XXXXXX")"
+
+    if curl -fsSL "$compat_url" -o "$addon_manager_script" \
+        && [ -s "$addon_manager_script" ] \
+        && sh "$addon_manager_script" "${ADDON_URLS[@]}"; then
+        rm -f "$addon_manager_script"
+        return 0
+    fi
+
+    rm -f "$addon_manager_script"
+    return 1
+}
+
 echo "[5/7] Registering addons..."
 if [[ "$SKIP_ADDONS" == "1" ]]; then
     echo "Addon registration skipped by IVLYRICS_SKIP_ADDONS=1."
 elif command -v spicetify >/dev/null 2>&1; then
     COMPAT_URL="$RAW_BASE_URL/addon-manager-compat.sh?ts=$(date +%s)"
-    if curl -fsSL "$COMPAT_URL" | sh -s -- "${ADDON_URLS[@]}"; then
+    if register_addons "$COMPAT_URL"; then
         echo "Addons registered successfully."
     else
         echo "Addon registration failed. Server install succeeded, but addon registration needs manual retry."
-        echo "Manual command:"
-        echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" | sh -s -- \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
+        echo "Manual commands:"
+        print_manual_addon_registration
     fi
 else
     echo "spicetify was not found, so addon registration was skipped."
-    echo "Run this after installing/configuring spicetify:"
-    echo "  curl -fsSL \"$RAW_BASE_URL/addon-manager-compat.sh\" | sh -s -- \"${ADDON_URLS[0]}\" \"${ADDON_URLS[1]}\" \"${ADDON_URLS[2]}\" \"${ADDON_URLS[3]}\""
+    echo "Run these after installing/configuring spicetify:"
+    print_manual_addon_registration
 fi
 
 echo "[6/7] Starting server..."
@@ -122,10 +146,31 @@ if [[ -z "$HEALTH_HEADERS" ]]; then
     exit 1
 fi
 
-echo "$HEALTH_HEADERS" | tr -d '\r' | grep -qi '^access-control-allow-origin: \*$' || {
-    echo "CORS header check failed: access-control-allow-origin: * not found"
+CORS_TEST_ORIGIN="spicetify://ivlyrics"
+CORS_HEADERS="$(curl -fsSI -H "Origin: $CORS_TEST_ORIGIN" "$SERVER_URL/health" || true)"
+if [[ -z "$CORS_HEADERS" ]]; then
+    echo "CORS header check failed: $SERVER_URL/health did not respond to Origin: $CORS_TEST_ORIGIN"
     exit 1
-}
+fi
+
+CORS_ALLOW_ORIGIN="$(
+    printf '%s\n' "$CORS_HEADERS" \
+        | tr -d '\r' \
+        | grep -i '^access-control-allow-origin:' \
+        | head -n 1 \
+        | cut -d ':' -f 2- \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)"
+
+if [[ "$CORS_ALLOW_ORIGIN" != "$CORS_TEST_ORIGIN" ]]; then
+    echo "CORS header check failed: expected access-control-allow-origin: $CORS_TEST_ORIGIN"
+    if [[ -n "$CORS_ALLOW_ORIGIN" ]]; then
+        echo "Actual: access-control-allow-origin: $CORS_ALLOW_ORIGIN"
+    else
+        echo "Actual: access-control-allow-origin header was missing"
+    fi
+    exit 1
+fi
 
 echo ""
 echo "✓ Installation complete!"

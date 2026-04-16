@@ -6,16 +6,20 @@ mod matching;
 mod musixmatch;
 
 use std::collections::HashMap;
-use std::fs::create_dir_all;
-use std::net::SocketAddr;
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::extract::Request;
+use axum::extract::{ConnectInfo, Query, State};
+use axum::http::header::{CONTENT_TYPE, ORIGIN};
 use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method};
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{delete, get, post};
@@ -29,15 +33,15 @@ use logging::{
 };
 use matching::{
     artist_variants, can_use_title_only_fallback, exact_title_artist_match,
-    is_acceptable_bugs_match,
-    is_acceptable_deezer_match, is_acceptable_genie_match, is_acceptable_match, normalize,
-    score_bugs_track, score_deezer_track, score_genie_track, score_track, strip_lyrics_footer,
-    title_variants,
+    is_acceptable_bugs_match, is_acceptable_deezer_match, is_acceptable_genie_match,
+    is_acceptable_match, normalize, score_bugs_track, score_deezer_track, score_genie_track,
+    score_track, strip_lyrics_footer, title_variants,
 };
 use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
+use reqwest::Url;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -238,23 +242,29 @@ async fn main() {
 
     spawn_cache_cleanup_task(state.cache.clone(), logger.clone());
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/lyrics", get(get_lyrics))
+    let admin_routes = Router::new()
         .route("/cache", delete(clear_cache))
         .route("/config", get(get_config).post(save_config))
         .route("/update/check", get(update_check))
         .route("/update/apply", post(update_apply))
         .route("/update/apply-all", post(update_apply_all))
+        .route_layer(middleware::from_fn(admin_request_guard));
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/lyrics", get(get_lyrics))
+        .merge(admin_routes)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    is_trusted_origin(origin)
+                }))
+                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_headers([CONTENT_TYPE]),
         )
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = bind_addr(port, &logger);
     logger.log_tagged("Server", &format!("리스너 바인딩 준비: {addr}"));
     println!("ivLyrics MusicXMatch Server listening on http://{addr}");
 
@@ -262,9 +272,12 @@ async fn main() {
         .await
         .expect("failed to bind TCP listener");
     logger.log_tagged("Server", "리스너 바인딩 완료");
-    axum::serve(listener, app)
-        .await
-        .expect("server exited unexpectedly");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server exited unexpectedly");
 }
 
 fn build_client() -> Musixmatch {
@@ -289,6 +302,26 @@ fn provider_timeout(provider: &str, default_secs: u64) -> Duration {
         .or_else(|| read_timeout_secs("IVLYRICS_HTTP_TIMEOUT_SECS"))
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
+fn bind_addr(port: u16, logger: &Logger) -> SocketAddr {
+    let ip = match std::env::var("IVLYRICS_BIND_HOST") {
+        Ok(value) => match value.trim().parse::<IpAddr>() {
+            Ok(ip) => ip,
+            Err(error) => {
+                logger.log_tagged(
+                    "Server",
+                    &format!(
+                        "IVLYRICS_BIND_HOST 파싱 실패 value={value:?} detail={error}; 127.0.0.1 사용"
+                    ),
+                );
+                IpAddr::from([127, 0, 0, 1])
+            }
+        },
+        Err(_) => IpAddr::from([127, 0, 0, 1]),
+    };
+
+    SocketAddr::new(ip, port)
 }
 
 fn read_timeout_secs(key: &str) -> Option<u64> {
@@ -342,20 +375,68 @@ fn config_file_path() -> PathBuf {
     path
 }
 
-fn load_config(path: &PathBuf) -> AppConfig {
+fn load_config(path: &Path) -> AppConfig {
     match std::fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
         Err(_) => AppConfig::default(),
     }
 }
 
-fn save_config_file(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
+fn save_config_file(path: &Path, config: &AppConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
     let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
-    std::fs::write(path, bytes).map_err(|error| error.to_string())
+    write_private_file_atomic(path, &bytes)
+}
+
+fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("config.json");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(bytes).map_err(|error| error.to_string())?;
+        file.write_all(b"\n").map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        set_private_file_permissions(&temp_path)?;
+
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+
+        std::fs::rename(&temp_path, path).map_err(|error| error.to_string())?;
+        set_private_file_permissions(path)
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
 }
 
 fn deserialize_boolish_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -379,11 +460,7 @@ where
 
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log_tagged("Server", "GET /health 요청");
-    let update_available = latest_version_info()
-        .await
-        .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
-        .unwrap_or(false);
-    let payload = health_payload(&state, update_available).await;
+    let payload = health_payload(&state, false).await;
     json_response(StatusCode::OK, payload)
 }
 
@@ -445,14 +522,11 @@ async fn save_config(
 
     if let Some(arl) = next.deezer_arl.as_deref() {
         match state.deezer.validate_arl(arl).await {
-            Ok(()) => state
-                .logger
-                .log_tagged("Deezer", "설정 검증 성공"),
+            Ok(()) => state.logger.log_tagged("Deezer", "설정 검증 성공"),
             Err(error) => {
-                state.logger.log_tagged(
-                    "Deezer",
-                    &format!("설정 검증 실패 detail={}", error),
-                );
+                state
+                    .logger
+                    .log_tagged("Deezer", &format!("설정 검증 실패 detail={}", error));
                 return json_response(
                     StatusCode::BAD_REQUEST,
                     ErrorPayload {
@@ -472,7 +546,10 @@ async fn save_config(
     if let Err(error) = set_private_file_permissions(&state.config_path) {
         state.logger.log_tagged(
             "Server",
-            &format!("설정 파일 권한 조정 실패 path={} detail={error}", state.config_path.display()),
+            &format!(
+                "설정 파일 권한 조정 실패 path={} detail={error}",
+                state.config_path.display()
+            ),
         );
     }
 
@@ -521,7 +598,7 @@ async fn get_lyrics(
             .into_response();
     }
 
-    let cache_key = build_cache_key(&title, &artist, &spotify_id, backend);
+    let cache_key = build_cache_key(&title, &artist, &spotify_id, query.duration_ms, backend);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
         state.logger.log_tagged(
             provider_log_tag(cached.provider),
@@ -650,6 +727,97 @@ fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
             .expect("valid content-type header"),
     );
     response
+}
+
+async fn admin_request_guard(request: Request, next: Next) -> Response {
+    let remote_allowed = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().is_loopback())
+        .unwrap_or(true);
+
+    if !remote_allowed {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            ErrorPayload {
+                detail: "Admin endpoint is only available from loopback clients.".to_string(),
+            },
+        );
+    }
+
+    if let Some(origin) = request.headers().get(ORIGIN) {
+        if !is_trusted_origin(origin) {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                ErrorPayload {
+                    detail: "Origin is not allowed for admin endpoints.".to_string(),
+                },
+            );
+        }
+    }
+
+    next.run(request).await
+}
+
+fn is_trusted_origin(origin: &HeaderValue) -> bool {
+    origin.to_str().map(is_trusted_origin_str).unwrap_or(false)
+}
+
+fn is_trusted_origin_str(origin: &str) -> bool {
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return false;
+    }
+
+    if configured_allowed_origins()
+        .iter()
+        .any(|allowed| allowed == origin || allowed == "*")
+    {
+        return true;
+    }
+
+    if origin.eq_ignore_ascii_case("null") {
+        return true;
+    }
+
+    let Ok(parsed) = Url::parse(origin) else {
+        return false;
+    };
+
+    match parsed.scheme() {
+        "http" | "https" => parsed
+            .host_str()
+            .map(|host| is_loopback_host(host) || is_trusted_spotify_host(host))
+            .unwrap_or(false),
+        "spicetify" | "spotify" | "app" | "file" | "tauri" => true,
+        _ => false,
+    }
+}
+
+fn configured_allowed_origins() -> Vec<String> {
+    std::env::var("IVLYRICS_ALLOWED_ORIGINS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().trim_end_matches('/').to_string())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn is_trusted_spotify_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("xpui.app.spotify.com")
 }
 
 async fn latest_version_info() -> Result<VersionInfo, String> {
@@ -965,10 +1133,7 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
     );
 }
 
-fn spawn_cache_cleanup_task(
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
-    logger: Logger,
-) {
+fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logger: Logger) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(CACHE_CLEANUP_INTERVAL);
         loop {
@@ -981,7 +1146,11 @@ fn spawn_cache_cleanup_task(
             if removed > 0 {
                 logger.log_tagged(
                     "Server",
-                    &format!("캐시 정리 완료 removed={} remaining={}", removed, cache.len()),
+                    &format!(
+                        "캐시 정리 완료 removed={} remaining={}",
+                        removed,
+                        cache.len()
+                    ),
                 );
             }
         }
@@ -1004,7 +1173,13 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
     }
 }
 
-fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: BackendMode) -> String {
+fn build_cache_key(
+    title: &str,
+    artist: &str,
+    spotify_id: &str,
+    duration_ms: Option<u64>,
+    backend: BackendMode,
+) -> String {
     let prefix = match backend {
         BackendMode::Auto => "auto",
         BackendMode::Musicxmatch => "musicxmatch",
@@ -1012,10 +1187,21 @@ fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: Backend
         BackendMode::Bugs => "bugs",
         BackendMode::Genie => "genie",
     };
+    let duration_part = duration_ms
+        .map(|value| {
+            let rounded = ((value + 500) / 1000).max(1);
+            format!(":duration:{rounded}s")
+        })
+        .unwrap_or_default();
     if !spotify_id.is_empty() {
-        return format!("{prefix}:spotify:{spotify_id}");
+        return format!("{prefix}:spotify:{spotify_id}{duration_part}");
     }
-    format!("{prefix}:{}::{}", normalize(title), normalize(artist))
+    format!(
+        "{prefix}:{}::{}{}",
+        normalize(title),
+        normalize(artist),
+        duration_part
+    )
 }
 
 async fn fetch_payload(
@@ -1058,15 +1244,11 @@ async fn fetch_payload(
                 .await
                 .map_err(LyricsError::Bugs)
         }
-        BackendMode::Genie => fetch_genie_payload(
-            &state.genie,
-            title,
-            artist,
-            duration_secs,
-            include_debug,
-        )
-        .await
-        .map_err(LyricsError::Genie),
+        BackendMode::Genie => {
+            fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
+                .await
+                .map_err(LyricsError::Genie)
+        }
         BackendMode::Auto => match fetch_musixmatch_payload(
             &state.mxm,
             title,
@@ -1114,10 +1296,9 @@ async fn fetch_payload(
                 }
 
                 let bugs_error = bugs_result.err();
-                state.logger.log_tagged(
-                    "Bugs",
-                    "fallback 조회 실패, Genie provider 시도",
-                );
+                state
+                    .logger
+                    .log_tagged("Bugs", "fallback 조회 실패, Genie provider 시도");
 
                 match fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
                     .await
@@ -1208,7 +1389,8 @@ async fn fetch_by_id(
     let mut debug = debug;
     if let Some(payload) = debug.as_mut() {
         payload.selected_track_id = Some(track.track_id);
-        payload.selected_track_duration_ms = Some(track.track_length.into());
+        payload.selected_track_duration_ms =
+            Some(u64::from(track.track_length).saturating_mul(1000));
     }
 
     let subtitle = mxm
@@ -1595,7 +1777,8 @@ async fn resolve_bugs_tracks(
             .partial_cmp(&score_bugs_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
+    candidates
+        .retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(BugsError::NotFound);
@@ -1656,7 +1839,8 @@ async fn resolve_genie_tracks(
             .partial_cmp(&score_genie_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
+    candidates
+        .retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(GenieError::NotFound);
@@ -1695,9 +1879,9 @@ fn has_exact_musixmatch_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_deezer_candidate(
@@ -1705,9 +1889,9 @@ fn has_exact_deezer_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_bugs_candidate(
@@ -1715,9 +1899,9 @@ fn has_exact_bugs_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_genie_candidate(
@@ -1725,9 +1909,9 @@ fn has_exact_genie_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
@@ -1804,10 +1988,10 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::to_bytes;
     use crate::matching::{
         collapse_to_words, duration_score, normalize_connectors, similarity, simplify,
     };
+    use axum::body::to_bytes;
     use std::fs;
 
     #[test]
@@ -1899,11 +2083,11 @@ mod tests {
 
     #[test]
     fn cache_keys_include_backend_mode() {
-        let auto = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Auto);
-        let mxm = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Musicxmatch);
-        let deezer = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Deezer);
-        let bugs = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Bugs);
-        let genie = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Genie);
+        let auto = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Auto);
+        let mxm = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Musicxmatch);
+        let deezer = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Deezer);
+        let bugs = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Bugs);
+        let genie = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Genie);
         assert_ne!(auto, mxm);
         assert_ne!(mxm, deezer);
         assert_ne!(auto, deezer);
@@ -1914,10 +2098,29 @@ mod tests {
     }
 
     #[test]
+    fn cache_keys_include_duration_when_available() {
+        let short = build_cache_key("Tell Me", "CAMO", "", Some(180_100), BackendMode::Auto);
+        let long = build_cache_key("Tell Me", "CAMO", "", Some(240_100), BackendMode::Auto);
+        let unknown_duration = build_cache_key("Tell Me", "CAMO", "", None, BackendMode::Auto);
+
+        assert_ne!(short, long);
+        assert_ne!(short, unknown_duration);
+        assert!(short.ends_with(":duration:180s"));
+    }
+
+    #[test]
     fn mask_secret_preserves_only_edges() {
         assert_eq!(mask_secret(""), "");
         assert_eq!(mask_secret("abcd"), "••••");
         assert_eq!(mask_secret("abcdefghijkl"), "abcd…ijkl");
+    }
+
+    #[test]
+    fn trusted_origin_rejects_regular_websites() {
+        assert!(is_trusted_origin_str("spicetify://ivlyrics"));
+        assert!(is_trusted_origin_str("https://xpui.app.spotify.com"));
+        assert!(is_trusted_origin_str("http://127.0.0.1:8092"));
+        assert!(!is_trusted_origin_str("https://example.com"));
     }
 
     #[test]
@@ -2011,11 +2214,8 @@ mod tests {
         let config_path = test_path("config");
         let state = test_state(AppConfig::default(), config_path.clone());
 
-        let response = save_config(
-            State(state),
-            Json(ConfigUpdatePayload { deezer_arl: None }),
-        )
-        .await;
+        let response =
+            save_config(State(state), Json(ConfigUpdatePayload { deezer_arl: None })).await;
         let _: ConfigPayload = parse_response_json(response).await;
 
         let mode = fs::metadata(&config_path)
@@ -2081,7 +2281,7 @@ mod tests {
     async fn get_lyrics_returns_cached_payload_without_network_fetch() {
         let config_path = test_path("config");
         let state = test_state(AppConfig::default(), config_path);
-        let cache_key = build_cache_key("Tell Me", "CAMO", "spotify123", BackendMode::Deezer);
+        let cache_key = build_cache_key("Tell Me", "CAMO", "spotify123", None, BackendMode::Deezer);
 
         store_cache(
             &state,
