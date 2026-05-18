@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.7.13-green.svg)](https://github.com/oneulddu/musicxmatch-api)
+[![Version](https://img.shields.io/badge/version-0.7.15-green.svg)](https://github.com/oneulddu/musicxmatch-api)
 
 [빠른 시작](#-빠른-시작) • [Provider 설정](#-provider-설정) • [API 문서](#-api-엔드포인트) • [문제 해결](#-문제-해결)
 
@@ -317,7 +317,7 @@ curl http://127.0.0.1:8092/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.13",
+  "version": "0.7.15",
   "provider": "musicxmatch",
   "backend": "musixmatch + deezer(optional) + bugs + genie",
   "cors": true,
@@ -434,7 +434,7 @@ node scripts/generate_addons.js
 ### 버전 업데이트
 
 ```bash
-./scripts/bump_version.sh 0.7.14
+./scripts/bump_version.sh 0.7.15
 ```
 
 ---
