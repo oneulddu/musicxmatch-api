@@ -207,6 +207,23 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon
   "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
 ```
 
+### ivLyrics 업데이트 후 provider 복구
+
+ivLyrics 업데이트가 `manifest.json`을 새로 쓰면 커스텀 provider 등록이 빠질 수 있습니다.
+한 번 등록했던 기록은 `addon_sources.json`에 남기 때문에, 아래 명령으로 기존 provider를 다시 복구할 수 있습니다.
+
+**Windows**
+```powershell
+& ([scriptblock]::Create((iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1").Content)) --restore
+```
+
+**macOS / Linux**
+```bash
+curl -fsSL "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh" | sh -s -- --restore
+```
+
+`--restore`를 생략하고 스크립트만 실행해도 같은 복구 모드로 동작합니다. 서버의 자동 복구 루프도 provider를 되살린 뒤 Spotify를 잠시 종료하고 `spicetify apply`를 실행한 다음, Spotify가 켜져 있었다면 다시 실행합니다.
+
 ---
 
 ## 🔄 업데이트

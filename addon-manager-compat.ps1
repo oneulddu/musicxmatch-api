@@ -1,6 +1,6 @@
 param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-    [string[]]$Urls
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Args
 )
 
 $addonDir = "$env:LOCALAPPDATA\spicetify\CustomApps\ivLyrics"
@@ -8,9 +8,30 @@ $sourcesDir = "$env:LOCALAPPDATA\spicetify\ivLyrics"
 $manifestPath = Join-Path $addonDir "manifest.json"
 $sourcesPath = Join-Path $sourcesDir "addon_sources.json"
 $repoRawMainPrefix = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
+$knownAddons = @(
+    "Addon_Lyrics_MusicXMatch.js",
+    "Addon_Lyrics_Deezer.js",
+    "Addon_Lyrics_Bugs.js",
+    "Addon_Lyrics_Genie.js"
+)
 $resolvedRef = $null
 $spotifyWasRunning = $false
 $spotifyPath = $null
+$restoreFromSources = $false
+$Urls = @()
+
+if ($Args.Count -gt 0 -and ($Args[0] -eq "--restore" -or $Args[0] -eq "--restore-existing")) {
+    $restoreFromSources = $true
+    if ($Args.Count -gt 1) {
+        $Urls = $Args[1..($Args.Count - 1)]
+    }
+} else {
+    $Urls = $Args
+}
+
+if ($Urls.Count -eq 0) {
+    $restoreFromSources = $true
+}
 
 if (-not (Test-Path $manifestPath)) {
     throw "ivLyrics manifest not found at $manifestPath"
@@ -31,12 +52,28 @@ try {
 
 $sources = @{}
 if (Test-Path $sourcesPath) {
-    $existing = Get-Content -Path $sourcesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($existing) {
-        $existing.PSObject.Properties | ForEach-Object {
-            $sources[$_.Name] = $_.Value
+    try {
+        $existing = Get-Content -Path $sourcesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($existing) {
+            $existing.PSObject.Properties | ForEach-Object {
+                $sources[$_.Name] = $_.Value
+            }
+        }
+    } catch {
+        $sources = @{}
+    }
+}
+
+if ($restoreFromSources) {
+    foreach ($name in $knownAddons) {
+        if ($sources.ContainsKey($name) -and $sources[$name] -is [string] -and ($sources[$name].StartsWith("http") -or $sources[$name].StartsWith("local:"))) {
+            $Urls += $sources[$name]
         }
     }
+}
+
+if ($Urls.Count -eq 0) {
+    throw "No addon URLs were provided and no restorable provider sources were found. Usage: addon-manager-compat.ps1 [--restore] <addon-url> [<addon-url> ...]"
 }
 
 $manifest = Get-Content -Path $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -44,6 +81,7 @@ if (-not $manifest.subfiles_extension) {
     $manifest | Add-Member -NotePropertyName subfiles_extension -NotePropertyValue @()
 }
 
+$registered = @()
 foreach ($url in $Urls) {
     $cleanUrl = ($url -split '\?')[0]
     $fileName = [System.IO.Path]::GetFileName($cleanUrl)
@@ -81,12 +119,18 @@ foreach ($url in $Urls) {
     }
 
     $destination = Join-Path $addonDir $fileName
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing
+    if ($cleanUrl.StartsWith("local:")) {
+        $localPath = $cleanUrl.Substring("local:".Length)
+        Copy-Item -Path $localPath -Destination $destination -Force
+    } else {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing
+    }
     $sources[$fileName] = $cleanUrl
 
     if ($manifest.subfiles_extension -notcontains $fileName) {
         $manifest.subfiles_extension += $fileName
     }
+    $registered += $fileName
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -94,8 +138,8 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($manifestPath, (($manifest | ConvertTo-Json -Depth 20) + "`r`n"), $utf8NoBom)
 
 Write-Host "Registered addons:"
-foreach ($url in $Urls) {
-    Write-Host " - $([System.IO.Path]::GetFileName(($url -split '\?')[0]))"
+foreach ($fileName in $registered) {
+    Write-Host " - $fileName"
 }
 
 if (Get-Command spicetify -ErrorAction SilentlyContinue) {
