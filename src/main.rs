@@ -1438,12 +1438,15 @@ async fn restore_known_provider_addons(
         if !needs_restore {
             continue;
         }
-        let source = source.unwrap_or_else(|| format!("{REPO_RAW_MAIN_URL}/{filename}"));
+        let mut file_available = file_exists;
 
-        if needs_restore {
+        if let Some(source) = source {
             match fetch_addon_source(client, &source).await {
                 Ok(content) => match std::fs::write(&target_path, content) {
-                    Ok(()) => restored.push(filename.to_string()),
+                    Ok(()) => {
+                        file_available = true;
+                        restored.push(filename.to_string());
+                    }
                     Err(error) => {
                         restore_errors.push(format!("{filename}: {}", error));
                         continue;
@@ -1454,13 +1457,15 @@ async fn restore_known_provider_addons(
                         restored.push(filename.to_string());
                     } else {
                         restore_errors.push(format!("{filename}: {error}"));
+                        continue;
                     }
-                    continue;
                 }
             }
+        } else if !file_available {
+            continue;
         }
 
-        if !listed {
+        if !listed && file_available {
             subfiles.push(serde_json::Value::String(filename.to_string()));
             manifest_changed = true;
             if file_exists {
