@@ -1761,13 +1761,15 @@ async fn fetch_musixmatch_payload(
             None,
             "track_id",
             duration_secs,
-            include_debug.then(|| DebugPayload {
-                source: "spotify_id",
-                matched_by: "track_id",
-                duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                selected_track_id: None,
-                selected_track_duration_ms: None,
-                search_variants: Vec::new(),
+            include_debug.then(|| {
+                debug_payload(
+                    "spotify_id",
+                    "track_id",
+                    duration_secs,
+                    None,
+                    None,
+                    Vec::new(),
+                )
             }),
         )
         .await
@@ -1783,13 +1785,15 @@ async fn fetch_musixmatch_payload(
         Some(resolution.track),
         resolution.matched_by,
         duration_secs,
-        include_debug.then(|| DebugPayload {
-            source: "search",
-            matched_by: resolution.matched_by,
-            duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-            selected_track_id: None,
-            selected_track_duration_ms: None,
-            search_variants: resolution.search_variants,
+        include_debug.then(|| {
+            debug_payload(
+                "search",
+                resolution.matched_by,
+                duration_secs,
+                None,
+                None,
+                resolution.search_variants,
+            )
         }),
     )
     .await
@@ -1880,13 +1884,15 @@ async fn fetch_deezer_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "deezer_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "deezer_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1919,13 +1925,15 @@ async fn fetch_bugs_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "bugs_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "bugs_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1958,13 +1966,15 @@ async fn fetch_genie_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "genie_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "genie_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1974,6 +1984,28 @@ async fn fetch_genie_payload(
     }
 
     Err(GenieError::NotAvailable)
+}
+
+fn debug_payload(
+    source: &'static str,
+    matched_by: &'static str,
+    duration_secs: Option<f32>,
+    selected_track_id: Option<u64>,
+    selected_track_duration_ms: Option<u64>,
+    search_variants: Vec<String>,
+) -> DebugPayload {
+    DebugPayload {
+        source,
+        matched_by,
+        duration_ms: duration_ms_from_secs(duration_secs),
+        selected_track_id,
+        selected_track_duration_ms,
+        search_variants,
+    }
+}
+
+fn duration_ms_from_secs(duration_secs: Option<f32>) -> Option<u64> {
+    duration_secs.map(|value| (value * 1000.0).round() as u64)
 }
 
 struct TrackResolution {
@@ -2019,7 +2051,9 @@ async fn resolve_track(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_musixmatch_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &Track| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -2110,7 +2144,9 @@ async fn resolve_deezer_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_deezer_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &DeezerTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -2171,7 +2207,9 @@ async fn resolve_bugs_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_bugs_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &BugsTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -2233,7 +2271,9 @@ async fn resolve_genie_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_genie_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &GenieTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -2295,73 +2335,32 @@ async fn search_tracks(
         .await
 }
 
-fn has_exact_musixmatch_candidate(
-    tracks_by_id: &HashMap<u64, Track>,
+fn has_exact_candidate<T, F>(
+    tracks_by_id: &HashMap<u64, T>,
     title: &str,
     artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_deezer_candidate(
-    tracks_by_id: &HashMap<u64, DeezerTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_bugs_candidate(
-    tracks_by_id: &HashMap<u64, BugsTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_genie_candidate(
-    tracks_by_id: &HashMap<u64, GenieTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
+    track_fields: F,
+) -> bool
+where
+    F: for<'a> Fn(&'a T) -> (&'a str, &'a str),
+{
+    tracks_by_id.values().any(|track| {
+        let (track_name, artist_name) = track_fields(track);
+        exact_title_artist_match(track_name, artist_name, title, artist)
+    })
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
-        LyricsError::Bugs(BugsError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Bugs(BugsError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
-        LyricsError::Bugs(BugsError::Ratelimit) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Bugs rate limit reached. Wait a minute and try again.".to_string(),
-        ),
+        LyricsError::Bugs(BugsError::NotFound) => no_tracks_found(),
+        LyricsError::Bugs(BugsError::NotAvailable) => no_lyrics_available(),
+        LyricsError::Bugs(BugsError::Ratelimit) => rate_limit("Bugs"),
         LyricsError::Bugs(BugsError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Bugs error: {detail}"))
         }
-        LyricsError::Genie(GenieError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Genie(GenieError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
-        LyricsError::Genie(GenieError::Ratelimit) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Genie rate limit reached. Wait a minute and try again.".to_string(),
-        ),
+        LyricsError::Genie(GenieError::NotFound) => no_tracks_found(),
+        LyricsError::Genie(GenieError::NotAvailable) => no_lyrics_available(),
+        LyricsError::Genie(GenieError::Ratelimit) => rate_limit("Genie"),
         LyricsError::Genie(GenieError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Genie error: {detail}"))
         }
@@ -2369,13 +2368,8 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             StatusCode::SERVICE_UNAVAILABLE,
             "Deezer ARL cookie is not configured.".to_string(),
         ),
-        LyricsError::Deezer(DeezerError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Deezer(DeezerError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
+        LyricsError::Deezer(DeezerError::NotFound) => no_tracks_found(),
+        LyricsError::Deezer(DeezerError::NotAvailable) => no_lyrics_available(),
         LyricsError::Deezer(DeezerError::Auth(detail)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Deezer authentication failed: {detail}"),
@@ -2384,15 +2378,9 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             (StatusCode::BAD_GATEWAY, format!("Deezer error: {detail}"))
         }
         LyricsError::Musixmatch(error) => match error {
-            MxmError::NotFound => (StatusCode::NOT_FOUND, "No tracks found".to_string()),
-            MxmError::NotAvailable => (
-                StatusCode::NOT_FOUND,
-                "No lyrics are available for this track".to_string(),
-            ),
-            MxmError::Ratelimit => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Musixmatch rate limit reached. Wait a minute and try again.".to_string(),
-            ),
+            MxmError::NotFound => no_tracks_found(),
+            MxmError::NotAvailable => no_lyrics_available(),
+            MxmError::Ratelimit => rate_limit("Musixmatch"),
             MxmError::TokenExpired => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Musixmatch session expired. Retry in a moment.".to_string(),
@@ -2404,6 +2392,24 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             other => (StatusCode::BAD_GATEWAY, other.to_string()),
         },
     }
+}
+
+fn no_tracks_found() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "No tracks found".to_string())
+}
+
+fn no_lyrics_available() -> (StatusCode, String) {
+    (
+        StatusCode::NOT_FOUND,
+        "No lyrics are available for this track".to_string(),
+    )
+}
+
+fn rate_limit(provider: &str) -> (StatusCode, String) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("{provider} rate limit reached. Wait a minute and try again."),
+    )
 }
 
 #[cfg(test)]
