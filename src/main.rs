@@ -56,6 +56,8 @@ const GENIE_PROVIDER_NAME: &str = "genie";
 const VERSION_INFO_URL: &str =
     "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
 const REPO_RAW_MAIN_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main";
+const GITHUB_MAIN_COMMIT_URL: &str =
+    "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main";
 const KNOWN_PROVIDER_ADDONS: [&str; 4] = [
     "Addon_Lyrics_MusicXMatch.js",
     "Addon_Lyrics_Deezer.js",
@@ -1197,10 +1199,12 @@ fn spawn_addon_restore_task(logger: Logger) {
             .timeout(Duration::from_secs(DEFAULT_UPDATE_TIMEOUT_SECS))
             .build()
             .ok();
+        let mut apply_pending = false;
 
         loop {
             match restore_known_provider_addons(client.as_ref()).await {
                 Ok(restored) if !restored.is_empty() => {
+                    apply_pending = true;
                     logger.log_tagged(
                         "Server",
                         &format!(
@@ -1208,13 +1212,6 @@ fn spawn_addon_restore_task(logger: Logger) {
                             restored.join(",")
                         ),
                     );
-                    match apply_spicetify_changes() {
-                        Ok(()) => logger.log_tagged("Server", "spicetify apply 자동 실행 완료"),
-                        Err(error) => logger.log_tagged(
-                            "Server",
-                            &format!("spicetify apply 자동 실행 실패 detail={error}"),
-                        ),
-                    }
                 }
                 Ok(_) => {}
                 Err(error) => logger.log_tagged(
@@ -1223,16 +1220,36 @@ fn spawn_addon_restore_task(logger: Logger) {
                 ),
             }
 
+            if apply_pending {
+                match apply_spicetify_changes() {
+                    Ok(()) => {
+                        apply_pending = false;
+                        logger.log_tagged("Server", "spicetify apply 자동 실행 완료");
+                    }
+                    Err(error) => logger.log_tagged(
+                        "Server",
+                        &format!("spicetify apply 자동 실행 실패 detail={error}"),
+                    ),
+                }
+            }
+
             tokio::time::sleep(ADDON_RESTORE_INTERVAL).await;
         }
     });
 }
 
+#[derive(Default)]
+struct SpotifyRestartState {
+    was_running: bool,
+    #[cfg(target_os = "windows")]
+    executable_path: Option<PathBuf>,
+}
+
 fn apply_spicetify_changes() -> Result<(), String> {
-    let spotify_was_running = stop_spotify_if_running();
+    let spotify = stop_spotify_if_running();
     let apply_result = run_spicetify_apply();
-    if spotify_was_running {
-        if let Err(error) = restart_spotify() {
+    if spotify.was_running {
+        if let Err(error) = restart_spotify(&spotify) {
             if apply_result.is_ok() {
                 return Err(error);
             }
@@ -1263,7 +1280,7 @@ fn run_spicetify_apply() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn stop_spotify_if_running() -> bool {
+fn stop_spotify_if_running() -> SpotifyRestartState {
     let was_running = Command::new("pgrep")
         .args(["-x", "Spotify"])
         .output()
@@ -1278,36 +1295,41 @@ fn stop_spotify_if_running() -> bool {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    was_running
+    SpotifyRestartState { was_running }
 }
 
 #[cfg(target_os = "windows")]
-fn stop_spotify_if_running() -> bool {
-    let was_running = Command::new("powershell.exe")
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-Command",
-            "if (Get-Process -Name Spotify -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+            "$p = Get-Process -Name Spotify -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $p) { exit 1 }; if ($p.Path) { Write-Output $p.Path }; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2",
         ])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
+        .output();
 
-    if was_running {
-        let _ = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Stop-Process -Name Spotify -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2",
-            ])
-            .output();
+    let Ok(output) = output else {
+        return SpotifyRestartState::default();
+    };
+    if !output.status.success() {
+        return SpotifyRestartState::default();
     }
 
-    was_running
+    let executable_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    SpotifyRestartState {
+        was_running: true,
+        executable_path,
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn stop_spotify_if_running() -> bool {
+fn stop_spotify_if_running() -> SpotifyRestartState {
     let was_running = Command::new("pgrep")
         .args(["-x", "spotify"])
         .output()
@@ -1319,11 +1341,11 @@ fn stop_spotify_if_running() -> bool {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    was_running
+    SpotifyRestartState { was_running }
 }
 
 #[cfg(target_os = "macos")]
-fn restart_spotify() -> Result<(), String> {
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
     Command::new("open")
         .args(["-a", "Spotify"])
         .env("PATH", runtime_path())
@@ -1333,7 +1355,18 @@ fn restart_spotify() -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn restart_spotify() -> Result<(), String> {
+fn restart_spotify(spotify: &SpotifyRestartState) -> Result<(), String> {
+    if let Some(path) = spotify
+        .executable_path
+        .as_ref()
+        .filter(|path| path.exists())
+    {
+        return Command::new(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
     Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", "Start-Process spotify"])
         .spawn()
@@ -1342,7 +1375,7 @@ fn restart_spotify() -> Result<(), String> {
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn restart_spotify() -> Result<(), String> {
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
     Command::new("spotify")
         .env("PATH", runtime_path())
         .spawn()
@@ -1357,11 +1390,16 @@ async fn restore_known_provider_addons(
         return Ok(Vec::new());
     };
 
-    if !manifest_path.exists() || !sources_path.exists() {
+    if !manifest_path.exists() {
         return Ok(Vec::new());
     }
 
-    let sources = read_json_value(&sources_path)?;
+    let sources = if sources_path.exists() {
+        read_json_value(&sources_path)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
     let mut manifest = read_json_value(&manifest_path)?;
     let mut manifest_changed = false;
 
@@ -1395,13 +1433,14 @@ async fn restore_known_provider_addons(
             .any(|value| value.as_str() == Some(filename));
         let target_path = addon_dir.join(filename);
         let file_exists = target_path.exists();
+        let needs_restore = !listed || !file_exists;
 
-        if source.is_none() && !listed && !file_exists {
+        if !needs_restore {
             continue;
         }
         let source = source.unwrap_or_else(|| format!("{REPO_RAW_MAIN_URL}/{filename}"));
 
-        if !file_exists {
+        if needs_restore {
             match fetch_addon_source(client, &source).await {
                 Ok(content) => match std::fs::write(&target_path, content) {
                     Ok(()) => restored.push(filename.to_string()),
@@ -1411,7 +1450,11 @@ async fn restore_known_provider_addons(
                     }
                 },
                 Err(error) => {
-                    restore_errors.push(format!("{filename}: {error}"));
+                    if file_exists {
+                        restored.push(filename.to_string());
+                    } else {
+                        restore_errors.push(format!("{filename}: {error}"));
+                    }
                     continue;
                 }
             }
@@ -1486,8 +1529,18 @@ async fn fetch_addon_source(
 
     if source.starts_with("http://") || source.starts_with("https://") {
         let client = client.ok_or_else(|| "HTTP client is not available".to_string())?;
+        let mut download_url = source.to_string();
+        let repo_raw_main_prefix = format!("{REPO_RAW_MAIN_URL}/");
+        if let Some(relative_path) = source.strip_prefix(&repo_raw_main_prefix) {
+            if let Some(resolved_ref) = resolve_repo_main_ref(client).await {
+                download_url = format!(
+                    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/{resolved_ref}/{relative_path}"
+                );
+            }
+        }
+
         let response = client
-            .get(source)
+            .get(download_url)
             .send()
             .await
             .map_err(|error| error.to_string())?;
@@ -1498,6 +1551,26 @@ async fn fetch_addon_source(
     }
 
     std::fs::read_to_string(source).map_err(|error| error.to_string())
+}
+
+async fn resolve_repo_main_ref(client: &reqwest::Client) -> Option<String> {
+    let response = client
+        .get(GITHUB_MAIN_COMMIT_URL)
+        .header("User-Agent", "ivlyrics-musicxmatch-server")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .get("sha")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn set_private_file_permissions(path: &Path) -> Result<(), String> {

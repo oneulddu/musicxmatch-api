@@ -20,6 +20,34 @@ $spotifyPath = $null
 $restoreFromSources = $false
 $Urls = @()
 
+function Stop-SpotifyIfRunning {
+    try {
+        $spotifyProcess = Get-Process -Name Spotify -ErrorAction Stop | Select-Object -First 1
+        $script:spotifyWasRunning = $true
+        $script:spotifyPath = $spotifyProcess.Path
+        Stop-Process -Id $spotifyProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    } catch {
+        $script:spotifyWasRunning = $false
+    }
+}
+
+function Restart-SpotifyIfNeeded {
+    if (-not $script:spotifyWasRunning) {
+        return
+    }
+
+    try {
+        if ($script:spotifyPath -and (Test-Path -LiteralPath $script:spotifyPath)) {
+            Start-Process -FilePath $script:spotifyPath | Out-Null
+        } else {
+            Start-Process "spotify" | Out-Null
+        }
+    } catch {
+        Write-Warning "Failed to restart Spotify: $_"
+    }
+}
+
 if ($Args.Count -gt 0 -and ($Args[0] -eq "--restore" -or $Args[0] -eq "--restore-existing")) {
     $restoreFromSources = $true
     if ($Args.Count -gt 1) {
@@ -39,16 +67,6 @@ if (-not (Test-Path $manifestPath)) {
 
 New-Item -ItemType Directory -Force -Path $addonDir | Out-Null
 New-Item -ItemType Directory -Force -Path $sourcesDir | Out-Null
-
-try {
-    $spotifyProcess = Get-Process -Name Spotify -ErrorAction Stop | Select-Object -First 1
-    $spotifyWasRunning = $true
-    $spotifyPath = $spotifyProcess.Path
-    Stop-Process -Id $spotifyProcess.Id -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-} catch {
-    $spotifyWasRunning = $false
-}
 
 $sources = @{}
 if (Test-Path $sourcesPath) {
@@ -88,6 +106,10 @@ foreach ($url in $Urls) {
     $downloadUrl = $url
 
     if (-not $fileName -or -not $fileName.EndsWith('.js')) {
+        if ($restoreFromSources) {
+            Write-Warning "Skipping invalid addon source: $url"
+            continue
+        }
         throw "Invalid addon URL: $url"
     }
 
@@ -119,16 +141,30 @@ foreach ($url in $Urls) {
     }
 
     $destination = Join-Path $addonDir $fileName
-    try {
-        if ($cleanUrl.StartsWith("local:")) {
-            $localPath = $cleanUrl.Substring("local:".Length)
-            Copy-Item -Path $localPath -Destination $destination -Force -ErrorAction Stop
-        } else {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing -ErrorAction Stop
+    if (-not ($restoreFromSources -and (Test-Path -LiteralPath $destination))) {
+        try {
+            if ($cleanUrl.StartsWith("local:")) {
+                $localPath = $cleanUrl.Substring("local:".Length)
+                Copy-Item -LiteralPath $localPath -Destination $destination -Force -ErrorAction Stop
+            } else {
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing -ErrorAction Stop
+            }
+        } catch {
+            if ($restoreFromSources) {
+                Write-Warning "Skipping stale addon source: $url"
+                continue
+            }
+            throw
         }
-    } catch {
-        Write-Warning "Skipping stale addon source: $url"
-        continue
+    }
+
+    if (-not (Test-Path -LiteralPath $destination)) {
+        if ($restoreFromSources) {
+            Write-Warning "Skipping unavailable addon source: $url"
+            continue
+        } else {
+            throw "Addon file was not created at $destination"
+        }
     }
 
     $sources[$fileName] = $cleanUrl
@@ -153,13 +189,11 @@ foreach ($fileName in $registered) {
 }
 
 if (Get-Command spicetify -ErrorAction SilentlyContinue) {
-    spicetify apply
-    if ($spotifyWasRunning) {
-        if ($spotifyPath -and (Test-Path $spotifyPath)) {
-            Start-Process -FilePath $spotifyPath | Out-Null
-        } else {
-            Start-Process "spotify" | Out-Null
-        }
+    Stop-SpotifyIfRunning
+    try {
+        spicetify apply
+    } finally {
+        Restart-SpotifyIfNeeded
     }
 } else {
     Write-Warning "spicetify not found; addon files were registered but apply was skipped."

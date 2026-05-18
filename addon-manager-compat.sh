@@ -122,6 +122,9 @@ for url in "$@"; do
         *.js) ;;
         *)
             echo "Invalid addon URL: $url" >&2
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                continue
+            fi
             exit 1
             ;;
     esac
@@ -151,17 +154,31 @@ for url in "$@"; do
     case "$clean_url" in
         local:*)
             local_path="${clean_url#local:}"
-            if cp "$local_path" "$TMP_DIR/$filename"; then
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ] && [ -f "$ADDON_DIR/$filename" ]; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            elif cp "$local_path" "$TMP_DIR/$filename"; then
                 printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
             else
-                echo "Skipping stale addon source: $url" >&2
+                if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                    echo "Skipping stale addon source: $url" >&2
+                else
+                    echo "Failed to download addon source: $url" >&2
+                    exit 1
+                fi
             fi
             ;;
         *)
-            if curl -fsSL "$download_url" -o "$TMP_DIR/$filename"; then
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ] && [ -f "$ADDON_DIR/$filename" ]; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            elif curl -fsSL "$download_url" -o "$TMP_DIR/$filename"; then
                 printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
             else
-                echo "Skipping stale addon source: $url" >&2
+                if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                    echo "Skipping stale addon source: $url" >&2
+                else
+                    echo "Failed to download addon source: $url" >&2
+                    exit 1
+                fi
             fi
             ;;
     esac
@@ -207,7 +224,10 @@ for url in urls:
     filename = clean_url.rsplit("/", 1)[-1]
     source_file = tmp_dir / filename
     target_file = addon_dir / filename
-    target_file.write_text(source_file.read_text())
+    if source_file.exists():
+        target_file.write_text(source_file.read_text())
+    elif not target_file.exists():
+        continue
     sources[filename] = clean_url
     if filename not in subfiles:
         subfiles.append(filename)
