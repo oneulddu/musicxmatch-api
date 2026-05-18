@@ -111,6 +111,9 @@ if [ "$#" -eq 0 ]; then
     exit 1
 fi
 
+SUCCESS_URLS_PATH="$TMP_DIR/success_urls.txt"
+: > "$SUCCESS_URLS_PATH"
+
 for url in "$@"; do
     clean_url="${url%%\?*}"
     filename=$(basename "$clean_url")
@@ -148,13 +151,32 @@ for url in "$@"; do
     case "$clean_url" in
         local:*)
             local_path="${clean_url#local:}"
-            cp "$local_path" "$TMP_DIR/$filename"
+            if cp "$local_path" "$TMP_DIR/$filename"; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            else
+                echo "Skipping stale addon source: $url" >&2
+            fi
             ;;
         *)
-            curl -fsSL "$download_url" -o "$TMP_DIR/$filename"
+            if curl -fsSL "$download_url" -o "$TMP_DIR/$filename"; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            else
+                echo "Skipping stale addon source: $url" >&2
+            fi
             ;;
     esac
 done
+
+set --
+while IFS= read -r restored_url || [ -n "$restored_url" ]; do
+    [ -n "$restored_url" ] || continue
+    set -- "$@" "$restored_url"
+done < "$SUCCESS_URLS_PATH"
+
+if [ "$#" -eq 0 ]; then
+    echo "No addon files could be restored or registered." >&2
+    exit 1
+fi
 
 python3 - "$ADDON_DIR" "$SOURCES_PATH" "$MANIFEST_PATH" "$TMP_DIR" "$@" <<'PY'
 import json

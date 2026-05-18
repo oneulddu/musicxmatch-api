@@ -119,18 +119,28 @@ foreach ($url in $Urls) {
     }
 
     $destination = Join-Path $addonDir $fileName
-    if ($cleanUrl.StartsWith("local:")) {
-        $localPath = $cleanUrl.Substring("local:".Length)
-        Copy-Item -Path $localPath -Destination $destination -Force
-    } else {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing
+    try {
+        if ($cleanUrl.StartsWith("local:")) {
+            $localPath = $cleanUrl.Substring("local:".Length)
+            Copy-Item -Path $localPath -Destination $destination -Force -ErrorAction Stop
+        } else {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing -ErrorAction Stop
+        }
+    } catch {
+        Write-Warning "Skipping stale addon source: $url"
+        continue
     }
+
     $sources[$fileName] = $cleanUrl
 
     if ($manifest.subfiles_extension -notcontains $fileName) {
         $manifest.subfiles_extension += $fileName
     }
     $registered += $fileName
+}
+
+if ($registered.Count -eq 0) {
+    throw "No addon files could be restored or registered."
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
