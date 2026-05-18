@@ -45,6 +45,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const ADDON_RESTORE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_UPDATE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 8092;
@@ -54,6 +55,15 @@ const BUGS_PROVIDER_NAME: &str = "bugs";
 const GENIE_PROVIDER_NAME: &str = "genie";
 const VERSION_INFO_URL: &str =
     "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
+const REPO_RAW_MAIN_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main";
+const GITHUB_MAIN_COMMIT_URL: &str =
+    "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main";
+const KNOWN_PROVIDER_ADDONS: [&str; 4] = [
+    "Addon_Lyrics_MusicXMatch.js",
+    "Addon_Lyrics_Deezer.js",
+    "Addon_Lyrics_Bugs.js",
+    "Addon_Lyrics_Genie.js",
+];
 #[derive(Clone)]
 struct AppState {
     mxm: Musixmatch,
@@ -241,6 +251,7 @@ async fn main() {
     };
 
     spawn_cache_cleanup_task(state.cache.clone(), logger.clone());
+    spawn_addon_restore_task(logger.clone());
 
     let admin_routes = Router::new()
         .route("/cache", delete(clear_cache))
@@ -918,6 +929,35 @@ fn runtime_path() -> String {
         .join(":")
 }
 
+#[cfg(target_os = "windows")]
+fn runtime_path() -> String {
+    let mut parts = Vec::new();
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        parts.push(local_app_data.join("spicetify").display().to_string());
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        parts.push(
+            user_profile
+                .join(".cargo")
+                .join("bin")
+                .display()
+                .to_string(),
+        );
+    }
+    if let Ok(existing) = std::env::var("PATH") {
+        parts.push(existing);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .filter(|part| seen.insert(part.clone()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 async fn current_deezer_arl(state: &AppState) -> Option<String> {
     if let Ok(value) = std::env::var("DEEZER_ARL") {
         let trimmed = value.trim();
@@ -1151,6 +1191,391 @@ fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logg
             }
         }
     });
+}
+
+fn spawn_addon_restore_task(logger: Logger) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_UPDATE_TIMEOUT_SECS))
+            .build()
+            .ok();
+        let mut apply_pending = false;
+
+        loop {
+            match restore_known_provider_addons(client.as_ref()).await {
+                Ok(restored) if !restored.is_empty() => {
+                    apply_pending = true;
+                    logger.log_tagged(
+                        "Server",
+                        &format!(
+                            "ivLyrics provider 자동 복구 완료 files={}",
+                            restored.join(",")
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => logger.log_tagged(
+                    "Server",
+                    &format!("ivLyrics provider 자동 복구 건너뜀 detail={error}"),
+                ),
+            }
+
+            if apply_pending {
+                match apply_spicetify_changes() {
+                    Ok(()) => {
+                        apply_pending = false;
+                        logger.log_tagged("Server", "spicetify apply 자동 실행 완료");
+                    }
+                    Err(error) => logger.log_tagged(
+                        "Server",
+                        &format!("spicetify apply 자동 실행 실패 detail={error}"),
+                    ),
+                }
+            }
+
+            tokio::time::sleep(ADDON_RESTORE_INTERVAL).await;
+        }
+    });
+}
+
+#[derive(Default)]
+struct SpotifyRestartState {
+    was_running: bool,
+    #[cfg(target_os = "windows")]
+    executable_path: Option<PathBuf>,
+}
+
+fn apply_spicetify_changes() -> Result<(), String> {
+    let spotify = stop_spotify_if_running();
+    let apply_result = run_spicetify_apply();
+    if spotify.was_running {
+        if let Err(error) = restart_spotify(&spotify) {
+            if apply_result.is_ok() {
+                return Err(error);
+            }
+        }
+    }
+    apply_result
+}
+
+fn run_spicetify_apply() -> Result<(), String> {
+    let output = Command::new("spicetify")
+        .arg("apply")
+        .env("PATH", runtime_path())
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        format!("spicetify apply exited with {}", output.status)
+    } else {
+        detail
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let was_running = Command::new("pgrep")
+        .args(["-x", "Spotify"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if was_running {
+        let _ = Command::new("osascript")
+            .args(["-e", "tell application \"Spotify\" to quit"])
+            .output();
+        let _ = Command::new("pkill").args(["-x", "Spotify"]).output();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    SpotifyRestartState { was_running }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$p = Get-Process -Name Spotify -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $p) { exit 1 }; if ($p.Path) { Write-Output $p.Path }; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2",
+        ])
+        .output();
+
+    let Ok(output) = output else {
+        return SpotifyRestartState::default();
+    };
+    if !output.status.success() {
+        return SpotifyRestartState::default();
+    }
+
+    let executable_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    SpotifyRestartState {
+        was_running: true,
+        executable_path,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let was_running = Command::new("pgrep")
+        .args(["-x", "spotify"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if was_running {
+        let _ = Command::new("pkill").args(["-x", "spotify"]).output();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    SpotifyRestartState { was_running }
+}
+
+#[cfg(target_os = "macos")]
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
+    Command::new("open")
+        .args(["-a", "Spotify"])
+        .env("PATH", runtime_path())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn restart_spotify(spotify: &SpotifyRestartState) -> Result<(), String> {
+    if let Some(path) = spotify
+        .executable_path
+        .as_ref()
+        .filter(|path| path.exists())
+    {
+        return Command::new(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", "Start-Process spotify"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
+    Command::new("spotify")
+        .env("PATH", runtime_path())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn restore_known_provider_addons(
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<String>, String> {
+    let Some((addon_dir, sources_path, manifest_path)) = ivlyrics_addon_paths() else {
+        return Ok(Vec::new());
+    };
+
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let sources = if sources_path.exists() {
+        read_json_value(&sources_path)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let mut manifest = read_json_value(&manifest_path)?;
+    let mut manifest_changed = false;
+
+    if !manifest
+        .get("subfiles_extension")
+        .is_some_and(|value| value.is_array())
+    {
+        manifest["subfiles_extension"] = serde_json::Value::Array(Vec::new());
+        manifest_changed = true;
+    }
+
+    let subfiles = manifest
+        .get_mut("subfiles_extension")
+        .and_then(|value| value.as_array_mut())
+        .ok_or_else(|| "ivLyrics manifest subfiles_extension is missing or invalid".to_string())?;
+
+    create_dir_all(&addon_dir).map_err(|error| error.to_string())?;
+
+    let mut restored = Vec::new();
+    let mut restore_errors = Vec::new();
+    for filename in KNOWN_PROVIDER_ADDONS {
+        let source = sources
+            .get(filename)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let listed = subfiles
+            .iter()
+            .any(|value| value.as_str() == Some(filename));
+        let target_path = addon_dir.join(filename);
+        let file_exists = target_path.exists();
+        let needs_restore = !listed || !file_exists;
+
+        if !needs_restore {
+            continue;
+        }
+        let mut file_available = file_exists;
+
+        if let Some(source) = source {
+            match fetch_addon_source(client, &source).await {
+                Ok(content) => match std::fs::write(&target_path, content) {
+                    Ok(()) => {
+                        file_available = true;
+                        restored.push(filename.to_string());
+                    }
+                    Err(error) => {
+                        restore_errors.push(format!("{filename}: {}", error));
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    if file_exists {
+                        restored.push(filename.to_string());
+                    } else {
+                        restore_errors.push(format!("{filename}: {error}"));
+                        continue;
+                    }
+                }
+            }
+        } else if !file_available {
+            continue;
+        }
+
+        if !listed && file_available {
+            subfiles.push(serde_json::Value::String(filename.to_string()));
+            manifest_changed = true;
+            if file_exists {
+                restored.push(filename.to_string());
+            }
+        }
+    }
+
+    if manifest_changed {
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        std::fs::write(&manifest_path, [bytes.as_slice(), b"\n"].concat())
+            .map_err(|error| error.to_string())?;
+    }
+
+    restored.sort();
+    restored.dedup();
+    if restored.is_empty() && !restore_errors.is_empty() {
+        return Err(restore_errors.join("; "));
+    }
+    Ok(restored)
+}
+
+fn ivlyrics_addon_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+        let addon_dir = base.join("spicetify").join("CustomApps").join("ivLyrics");
+        let sources_path = base
+            .join("spicetify")
+            .join("ivLyrics")
+            .join("addon_sources.json");
+        let manifest_path = addon_dir.join("manifest.json");
+        Some((addon_dir, sources_path, manifest_path))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir()?;
+        let addon_dir = home
+            .join(".config")
+            .join("spicetify")
+            .join("CustomApps")
+            .join("ivLyrics");
+        let sources_path = home
+            .join(".config")
+            .join("spicetify")
+            .join("ivLyrics")
+            .join("addon_sources.json");
+        let manifest_path = addon_dir.join("manifest.json");
+        Some((addon_dir, sources_path, manifest_path))
+    }
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
+    let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| error.to_string())
+}
+
+async fn fetch_addon_source(
+    client: Option<&reqwest::Client>,
+    source: &str,
+) -> Result<String, String> {
+    if let Some(path) = source.strip_prefix("local:") {
+        return std::fs::read_to_string(path).map_err(|error| error.to_string());
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let client = client.ok_or_else(|| "HTTP client is not available".to_string())?;
+        let mut download_url = source.to_string();
+        let repo_raw_main_prefix = format!("{REPO_RAW_MAIN_URL}/");
+        if let Some(relative_path) = source.strip_prefix(&repo_raw_main_prefix) {
+            if let Some(resolved_ref) = resolve_repo_main_ref(client).await {
+                download_url = format!(
+                    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/{resolved_ref}/{relative_path}"
+                );
+            }
+        }
+
+        let response = client
+            .get(download_url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("addon download returned {}", response.status()));
+        }
+        return response.text().await.map_err(|error| error.to_string());
+    }
+
+    std::fs::read_to_string(source).map_err(|error| error.to_string())
+}
+
+async fn resolve_repo_main_ref(client: &reqwest::Client) -> Option<String> {
+    let response = client
+        .get(GITHUB_MAIN_COMMIT_URL)
+        .header("User-Agent", "ivlyrics-musicxmatch-server")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .get("sha")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn set_private_file_permissions(path: &Path) -> Result<(), String> {

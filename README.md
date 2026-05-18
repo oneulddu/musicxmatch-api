@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.7.13-green.svg)](https://github.com/oneulddu/musicxmatch-api)
+[![Version](https://img.shields.io/badge/version-0.7.15-green.svg)](https://github.com/oneulddu/musicxmatch-api)
 
 [빠른 시작](#-빠른-시작) • [Provider 설정](#-provider-설정) • [API 문서](#-api-엔드포인트) • [문제 해결](#-문제-해결)
 
@@ -207,6 +207,23 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon
   "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
 ```
 
+### ivLyrics 업데이트 후 provider 복구
+
+ivLyrics 업데이트가 `manifest.json`을 새로 쓰면 커스텀 provider 등록이 빠질 수 있습니다.
+한 번 등록했던 기록은 `addon_sources.json`에 남기 때문에, 아래 명령으로 기존 provider를 다시 복구할 수 있습니다.
+
+**Windows**
+```powershell
+& ([scriptblock]::Create((iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1").Content)) --restore
+```
+
+**macOS / Linux**
+```bash
+curl -fsSL "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh" | sh -s -- --restore
+```
+
+`--restore`를 생략하고 스크립트만 실행해도 같은 복구 모드로 동작합니다. 서버의 자동 복구 루프도 provider를 되살린 뒤 Spotify를 잠시 종료하고 `spicetify apply`를 실행한 다음, Spotify가 켜져 있었다면 다시 실행합니다.
+
 ---
 
 ## 🔄 업데이트
@@ -300,7 +317,7 @@ curl http://127.0.0.1:8092/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.13",
+  "version": "0.7.15",
   "provider": "musicxmatch",
   "backend": "musixmatch + deezer(optional) + bugs + genie",
   "cors": true,
@@ -417,7 +434,7 @@ node scripts/generate_addons.js
 ### 버전 업데이트
 
 ```bash
-./scripts/bump_version.sh 0.7.14
+./scripts/bump_version.sh 0.7.15
 ```
 
 ---
