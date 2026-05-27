@@ -6,10 +6,10 @@ mod matching;
 mod musixmatch;
 
 use std::collections::HashMap;
-use std::fs::create_dir_all;
+use std::fs::{create_dir_all, OpenOptions};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,10 +29,9 @@ use logging::{
 };
 use matching::{
     artist_variants, can_use_title_only_fallback, exact_title_artist_match,
-    is_acceptable_bugs_match,
-    is_acceptable_deezer_match, is_acceptable_genie_match, is_acceptable_match, normalize,
-    score_bugs_track, score_deezer_track, score_genie_track, score_track, strip_lyrics_footer,
-    title_variants,
+    is_acceptable_bugs_match, is_acceptable_deezer_match, is_acceptable_genie_match,
+    is_acceptable_match, normalize, score_bugs_track, score_deezer_track, score_genie_track,
+    score_track, strip_lyrics_footer, title_variants,
 };
 use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -44,6 +43,9 @@ const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_UPDATE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 8092;
+const UPDATE_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const UPDATE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+const UPDATE_LOCK_FORCE_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
 const BUGS_PROVIDER_NAME: &str = "bugs";
@@ -191,6 +193,12 @@ enum BackendMode {
 }
 
 #[derive(Debug, Serialize)]
+struct ReadyPayload {
+    status: &'static str,
+    version: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 struct UpdateCheckPayload {
     #[serde(rename = "currentVersion")]
     current_version: &'static str,
@@ -240,6 +248,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/lyrics", get(get_lyrics))
         .route("/cache", delete(clear_cache))
         .route("/config", get(get_config).post(save_config))
@@ -377,6 +386,16 @@ where
     }
 }
 
+async fn ready() -> Response {
+    json_response(
+        StatusCode::OK,
+        ReadyPayload {
+            status: "ok",
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    )
+}
+
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log_tagged("Server", "GET /health 요청");
     let update_available = latest_version_info()
@@ -445,14 +464,11 @@ async fn save_config(
 
     if let Some(arl) = next.deezer_arl.as_deref() {
         match state.deezer.validate_arl(arl).await {
-            Ok(()) => state
-                .logger
-                .log_tagged("Deezer", "설정 검증 성공"),
+            Ok(()) => state.logger.log_tagged("Deezer", "설정 검증 성공"),
             Err(error) => {
-                state.logger.log_tagged(
-                    "Deezer",
-                    &format!("설정 검증 실패 detail={}", error),
-                );
+                state
+                    .logger
+                    .log_tagged("Deezer", &format!("설정 검증 실패 detail={}", error));
                 return json_response(
                     StatusCode::BAD_REQUEST,
                     ErrorPayload {
@@ -472,7 +488,10 @@ async fn save_config(
     if let Err(error) = set_private_file_permissions(&state.config_path) {
         state.logger.log_tagged(
             "Server",
-            &format!("설정 파일 권한 조정 실패 path={} detail={error}", state.config_path.display()),
+            &format!(
+                "설정 파일 권한 조정 실패 path={} detail={error}",
+                state.config_path.display()
+            ),
         );
     }
 
@@ -614,10 +633,14 @@ async fn update_apply(State(state): State<AppState>) -> Response {
                 command: update_server_command_lines(),
             },
         ),
-        Err(error) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorPayload { detail: error },
-        ),
+        Err(error) => {
+            let status = if error.contains("already in progress") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_response(status, ErrorPayload { detail: error })
+        }
     }
 }
 
@@ -634,10 +657,14 @@ async fn update_apply_all(State(state): State<AppState>) -> Response {
                 command: update_all_command_lines(),
             },
         ),
-        Err(error) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorPayload { detail: error },
-        ),
+        Err(error) => {
+            let status = if error.contains("already in progress") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            json_response(status, ErrorPayload { detail: error })
+        }
     }
 }
 
@@ -827,6 +854,145 @@ fn update_runner_script_path() -> PathBuf {
     path
 }
 
+fn update_lock_file_path() -> PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".ivlyrics-musicxmatch");
+    path.push("update.lock");
+    path
+}
+
+fn create_update_lock() -> Result<PathBuf, String> {
+    let lock_path = update_lock_file_path();
+    if let Some(parent) = lock_path.parent() {
+        create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    for attempt in 0..2 {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                let _ = writeln!(file, "pid={}", std::process::id());
+                return Ok(lock_path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                if is_stale_update_lock(&lock_path) {
+                    let _ = std::fs::remove_file(&lock_path);
+                    continue;
+                }
+                return Err("An update is already in progress.".to_string());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err("An update is already in progress.".to_string());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Err("An update is already in progress.".to_string())
+}
+
+fn is_stale_update_lock(lock_path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return false;
+    };
+
+    if let Some(pid) = read_update_lock_pid(lock_path) {
+        if is_process_running(pid) {
+            return elapsed > UPDATE_LOCK_FORCE_STALE_AFTER;
+        }
+    }
+
+    elapsed > UPDATE_LOCK_STALE_AFTER
+}
+
+fn write_update_lock_pid(lock_path: &Path, pid: u32) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(lock_path)?;
+    writeln!(file, "pid={pid}")?;
+    file.flush()
+}
+
+fn read_update_lock_pid(lock_path: &Path) -> Option<u32> {
+    let contents = std::fs::read_to_string(lock_path).ok()?;
+    contents.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed
+            .strip_prefix("pid")
+            .and_then(|value| value.trim_start().strip_prefix('='))
+            .unwrap_or(trimmed)
+            .trim();
+        if value.chars().all(|character| character.is_ascii_digit()) {
+            value.parse::<u32>().ok().filter(|pid| *pid > 0)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(unix)]
+fn is_process_running(pid: u32) -> bool {
+    let Ok(output) = Command::new("kill")
+        .stdin(Stdio::null())
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+    else {
+        return false;
+    };
+
+    output.status.success()
+        || String::from_utf8_lossy(&output.stderr)
+            .to_ascii_lowercase()
+            .contains("not permitted")
+}
+
+#[cfg(target_os = "windows")]
+fn is_process_running(pid: u32) -> bool {
+    Command::new("powershell.exe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+            ),
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn is_process_running(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
@@ -858,29 +1024,56 @@ fn update_all_command_lines() -> Vec<String> {
 }
 
 fn spawn_update_process(include_addon: bool) -> Result<(), String> {
+    let lock_path = create_update_lock()?;
+
     #[cfg(target_os = "windows")]
     {
-        let mut command_lines = if include_addon {
-            update_all_command_lines()
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let lock_literal = powershell_single_quote(&lock_path.display().to_string());
+        let skip_addons_line = if include_addon {
+            "".to_string()
         } else {
-            update_server_command_lines()
+            "$env:IVLYRICS_SKIP_ADDONS = '1'".to_string()
         };
-        let install_command = command_lines.drain(..).collect::<Vec<_>>().join("; ");
-        let command = format!(
-            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; {}'",
-            install_command
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; \
+             Start-Sleep -Seconds 1; \
+             try {{ \
+               {skip_addons_line}; \
+               $installUrl = 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'); \
+               & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri $installUrl).Content)); \
+             }} finally {{ \
+               Remove-Item -LiteralPath {lock_literal} -Force -ErrorAction SilentlyContinue; \
+             }}"
         );
-        Command::new("powershell.exe")
+
+        match Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
+                "-WindowStyle",
+                "Hidden",
                 "-Command",
-                &command,
+                &script,
             ])
             .spawn()
-            .map_err(|error| error.to_string())?;
-        return Ok(());
+        {
+            Ok(child) => {
+                let _ = write_update_lock_pid(&lock_path, child.id());
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(lock_path);
+                Err(error.to_string())
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -890,32 +1083,65 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
         let update_log = update_log_file_path();
         let runner_script = update_runner_script_path();
         if let Some(parent) = update_log.parent() {
-            let _ = create_dir_all(parent);
+            create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         if let Some(parent) = runner_script.parent() {
             create_dir_all(parent).map_err(|error| error.to_string())?;
         }
+        rotate_file_if_too_large(&update_log, UPDATE_LOG_MAX_BYTES);
 
-        let mut script_lines = vec![
-            "#!/bin/sh".to_string(),
-            "set -eu".to_string(),
-            format!("export HOME='{}'", home_dir.display()),
-            format!("export PATH='{}'", path),
-            format!("echo \"[update] 시작 include_addon={include_addon}\""),
-            "echo \"[update] HOME=$HOME\"".to_string(),
-            "echo \"[update] PATH=$PATH\"".to_string(),
-            "sleep 1".to_string(),
-        ];
-
-        if include_addon {
-            script_lines.extend(update_all_command_lines());
+        let install_url = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)";
+        let lock_quoted = shell_single_quote(&lock_path.display().to_string());
+        let runner_quoted = shell_single_quote(&runner_script.display().to_string());
+        let update_log_quoted = shell_single_quote(&update_log.display().to_string());
+        let home_quoted = shell_single_quote(&home_dir.display().to_string());
+        let path_quoted = shell_single_quote(&path);
+        let addon_env = if include_addon {
+            ""
         } else {
-            script_lines.extend(update_server_command_lines());
-        }
+            "IVLYRICS_SKIP_ADDONS=1 "
+        };
+        let script = format!(
+            r#"#!/bin/bash
+set -euo pipefail
+install_script=""
+update_log={update_log_quoted}
+max_log_bytes={UPDATE_LOG_MAX_BYTES}
 
-        script_lines.push("echo \"[update] 완료\"".to_string());
-        std::fs::write(&runner_script, format!("{}\n", script_lines.join("\n")))
-            .map_err(|error| error.to_string())?;
+rotate_update_log() {{
+    if [ -f "$update_log" ] && [ "$(wc -c < "$update_log" 2>/dev/null || echo 0)" -gt "$max_log_bytes" ]; then
+        rm -f "$update_log.1"
+        mv "$update_log" "$update_log.1" 2>/dev/null || : > "$update_log"
+    fi
+}}
+
+cleanup() {{
+    rm -f {lock_quoted}
+    rm -f {runner_quoted}
+    if [ -n "${{install_script:-}}" ]; then
+        rm -f "$install_script"
+    fi
+}}
+
+trap cleanup EXIT INT TERM
+mkdir -p "$(dirname -- "$update_log")"
+exec > >(while IFS= read -r line; do rotate_update_log; printf '%s\n' "$line" >> "$update_log"; done) 2>&1
+
+export HOME={home_quoted}
+export PATH={path_quoted}
+echo "[update] 시작 include_addon={include_addon}"
+echo "[update] HOME=$HOME"
+echo "[update] PATH=$PATH"
+sleep 1
+install_script="$(mktemp "${{TMPDIR:-/tmp}}/ivlyrics-install.XXXXXX")"
+curl -fsSL "{install_url}" -o "$install_script"
+{addon_env}bash "$install_script"
+rm -f "$install_script"
+install_script=""
+echo "[update] 완료"
+"#
+        );
+        std::fs::write(&runner_script, script).map_err(|error| error.to_string())?;
 
         #[cfg(unix)]
         {
@@ -925,19 +1151,43 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
         }
 
-        Command::new("sh")
-            .env("PATH", path)
-            .args([
-                "-c",
-                &format!(
-                    "nohup sh '{}' >> '{}' 2>&1 &",
-                    runner_script.display(),
-                    update_log.display()
-                ),
-            ])
+        match Command::new("nohup")
+            .env("HOME", &home_dir)
+            .env("PATH", &path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .arg("bash")
+            .arg(&runner_script)
             .spawn()
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        {
+            Ok(child) => {
+                let _ = write_update_lock_pid(&lock_path, child.id());
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(lock_path);
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+fn rotate_file_if_too_large(path: &Path, max_bytes: u64) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= max_bytes {
+        return;
+    }
+
+    let rotated = path.with_extension(match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) if !extension.is_empty() => format!("{extension}.1"),
+        _ => "1".to_string(),
+    });
+    let _ = std::fs::remove_file(&rotated);
+    if std::fs::rename(path, &rotated).is_err() {
+        let _ = OpenOptions::new().write(true).truncate(true).open(path);
     }
 }
 
@@ -965,10 +1215,7 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
     );
 }
 
-fn spawn_cache_cleanup_task(
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
-    logger: Logger,
-) {
+fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logger: Logger) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(CACHE_CLEANUP_INTERVAL);
         loop {
@@ -981,7 +1228,11 @@ fn spawn_cache_cleanup_task(
             if removed > 0 {
                 logger.log_tagged(
                     "Server",
-                    &format!("캐시 정리 완료 removed={} remaining={}", removed, cache.len()),
+                    &format!(
+                        "캐시 정리 완료 removed={} remaining={}",
+                        removed,
+                        cache.len()
+                    ),
                 );
             }
         }
@@ -1058,15 +1309,11 @@ async fn fetch_payload(
                 .await
                 .map_err(LyricsError::Bugs)
         }
-        BackendMode::Genie => fetch_genie_payload(
-            &state.genie,
-            title,
-            artist,
-            duration_secs,
-            include_debug,
-        )
-        .await
-        .map_err(LyricsError::Genie),
+        BackendMode::Genie => {
+            fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
+                .await
+                .map_err(LyricsError::Genie)
+        }
         BackendMode::Auto => match fetch_musixmatch_payload(
             &state.mxm,
             title,
@@ -1114,10 +1361,9 @@ async fn fetch_payload(
                 }
 
                 let bugs_error = bugs_result.err();
-                state.logger.log_tagged(
-                    "Bugs",
-                    "fallback 조회 실패, Genie provider 시도",
-                );
+                state
+                    .logger
+                    .log_tagged("Bugs", "fallback 조회 실패, Genie provider 시도");
 
                 match fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
                     .await
@@ -1595,7 +1841,8 @@ async fn resolve_bugs_tracks(
             .partial_cmp(&score_bugs_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
+    candidates
+        .retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(BugsError::NotFound);
@@ -1656,7 +1903,8 @@ async fn resolve_genie_tracks(
             .partial_cmp(&score_genie_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
+    candidates
+        .retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
 
     if candidates.is_empty() {
         return Err(GenieError::NotFound);
@@ -1695,9 +1943,9 @@ fn has_exact_musixmatch_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_deezer_candidate(
@@ -1705,9 +1953,9 @@ fn has_exact_deezer_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_bugs_candidate(
@@ -1715,9 +1963,9 @@ fn has_exact_bugs_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn has_exact_genie_candidate(
@@ -1725,9 +1973,9 @@ fn has_exact_genie_candidate(
     title: &str,
     artist: &str,
 ) -> bool {
-    tracks_by_id.values().any(|track| {
-        exact_title_artist_match(&track.track_name, &track.artist_name, title, artist)
-    })
+    tracks_by_id
+        .values()
+        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
@@ -1804,10 +2052,10 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::to_bytes;
     use crate::matching::{
         collapse_to_words, duration_score, normalize_connectors, similarity, simplify,
     };
+    use axum::body::to_bytes;
     use std::fs;
 
     #[test]
@@ -2011,11 +2259,8 @@ mod tests {
         let config_path = test_path("config");
         let state = test_state(AppConfig::default(), config_path.clone());
 
-        let response = save_config(
-            State(state),
-            Json(ConfigUpdatePayload { deezer_arl: None }),
-        )
-        .await;
+        let response =
+            save_config(State(state), Json(ConfigUpdatePayload { deezer_arl: None })).await;
         let _: ConfigPayload = parse_response_json(response).await;
 
         let mode = fs::metadata(&config_path)

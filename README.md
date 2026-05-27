@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.7.13-green.svg)](https://github.com/oneulddu/musicxmatch-api)
+[![Version](https://img.shields.io/badge/version-0.7.14-green.svg)](https://github.com/oneulddu/musicxmatch-api)
 
 [빠른 시작](#-빠른-시작) • [Provider 설정](#-provider-설정) • [API 문서](#-api-엔드포인트) • [문제 해결](#-문제-해결)
 
@@ -47,7 +47,7 @@
 <td width="50%">
 
 ### 🔄 자동 시작
-- OS 부팅 시 백그라운드 실행
+- 사용자 로그인 시 백그라운드 실행
 - 별도 설정 없이 즉시 사용
 - 안정적인 서비스 제공
 
@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 설치 스크립트는 다음을 자동으로 수행합니다:
 
 1. ✅ 로컬 서버 설치 (`http://127.0.0.1:8092`)
-2. ✅ OS 부팅 시 자동 시작 설정
+2. ✅ 사용자 로그인 시 자동 시작 설정
 3. ✅ 서버 health check 및 CORS 검증
 4. ✅ 4개 provider addon 자동 등록
 5. ✅ `spicetify apply` 자동 적용
@@ -300,7 +300,7 @@ curl http://127.0.0.1:8092/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.13",
+  "version": "0.7.14",
   "provider": "musicxmatch",
   "backend": "musixmatch + deezer(optional) + bugs + genie",
   "cors": true,

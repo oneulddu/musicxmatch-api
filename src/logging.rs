@@ -1,11 +1,13 @@
-use std::fs::{create_dir_all, OpenOptions};
+use std::fs::{create_dir_all, metadata, remove_file, rename, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::BackendMode;
 use time::format_description::FormatItem;
 use time::macros::format_description;
+
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 const LOG_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
@@ -13,6 +15,7 @@ const LOG_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
 #[derive(Clone)]
 pub struct Logger {
     file: Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    path: PathBuf,
 }
 
 impl Logger {
@@ -20,10 +23,12 @@ impl Logger {
         if let Some(parent) = path.parent() {
             let _ = create_dir_all(parent);
         }
+        rotate_log_if_needed(&path);
 
-        let file = OpenOptions::new().create(true).append(true).open(path).ok();
+        let file = open_log_file(&path);
         Self {
             file: Arc::new(std::sync::Mutex::new(file)),
+            path,
         }
     }
 
@@ -35,18 +40,19 @@ impl Logger {
         let line = format!("[{}] {message}\n", timestamp_string());
         print!("{line}");
         if let Ok(mut guard) = self.file.lock() {
+            reopen_if_log_too_large(&self.path, &mut guard);
             if let Some(file) = guard.as_mut() {
                 let _ = file.write_all(line.as_bytes());
                 let _ = file.flush();
             }
+            reopen_if_log_too_large(&self.path, &mut guard);
         }
     }
 }
 
 fn timestamp_string() -> String {
-    let now = time::OffsetDateTime::now_utc().to_offset(
-        time::UtcOffset::from_hms(9, 0, 0).unwrap_or(time::UtcOffset::UTC),
-    );
+    let now = time::OffsetDateTime::now_utc()
+        .to_offset(time::UtcOffset::from_hms(9, 0, 0).unwrap_or(time::UtcOffset::UTC));
     now.format(LOG_TIMESTAMP_FORMAT)
         .unwrap_or_else(|_| "0000-00-00 00:00:00".to_string())
 }
@@ -125,5 +131,50 @@ pub fn translate_log_detail(detail: &str) -> String {
             "Deezer ARL 설정 검증 실패".to_string()
         }
         other => other.to_string(),
+    }
+}
+
+fn open_log_file(path: &Path) -> Option<File> {
+    OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+fn reopen_if_log_too_large(path: &Path, file: &mut Option<File>) {
+    let is_too_large = file
+        .as_ref()
+        .and_then(|value| value.metadata().ok())
+        .map(|metadata| metadata.len() > LOG_MAX_BYTES)
+        .unwrap_or_else(|| {
+            metadata(path)
+                .map(|metadata| metadata.len() > LOG_MAX_BYTES)
+                .unwrap_or(false)
+        });
+
+    if !is_too_large {
+        if file.is_none() {
+            *file = open_log_file(path);
+        }
+        return;
+    }
+
+    *file = None;
+    rotate_log_if_needed(path);
+    *file = open_log_file(path);
+}
+
+fn rotate_log_if_needed(path: &Path) {
+    let Ok(current) = metadata(path) else {
+        return;
+    };
+    if current.len() <= LOG_MAX_BYTES {
+        return;
+    }
+
+    let rotated = path.with_extension(match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) if !extension.is_empty() => format!("{extension}.1"),
+        _ => "1".to_string(),
+    });
+    let _ = remove_file(&rotated);
+    if rename(path, &rotated).is_err() {
+        let _ = OpenOptions::new().write(true).truncate(true).open(path);
     }
 }
