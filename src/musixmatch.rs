@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -12,9 +12,9 @@ use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha1::Sha1;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
+use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 const APP_ID: &str = "android-player-v1.0";
@@ -131,14 +131,24 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Ratelimit => write!(f, "You are sending requests too fast. Wait a minute and try again."),
-            Self::TokenExpired => write!(f, "The Musixmatch user token expired. Request a new one."),
+            Self::Ratelimit => write!(
+                f,
+                "You are sending requests too fast. Wait a minute and try again."
+            ),
+            Self::TokenExpired => {
+                write!(f, "The Musixmatch user token expired. Request a new one.")
+            }
             Self::NotFound => write!(f, "The requested content could not be found"),
-            Self::NotAvailable => write!(f, "Unfortunately we're not authorized to show these lyrics"),
+            Self::NotAvailable => {
+                write!(f, "Unfortunately we're not authorized to show these lyrics")
+            }
             Self::InvalidData(detail) => write!(f, "JSON parsing error: {detail}"),
             Self::Http(error) => write!(f, "http error: {error}"),
             Self::Provider { status_code, msg } => {
-                write!(f, "Error {status_code} returned by the Musixmatch API. Message: '{msg}'")
+                write!(
+                    f,
+                    "Error {status_code} returned by the Musixmatch API. Message: '{msg}'"
+                )
             }
         }
     }
@@ -280,20 +290,17 @@ impl Musixmatch {
                 ("guid", guid.as_str()),
                 ("lang", "en_US"),
                 ("model", self.model_string().as_str()),
-                ("timestamp", now.format(&Rfc3339).unwrap_or_default().as_str()),
+                (
+                    "timestamp",
+                    now.format(&Rfc3339).unwrap_or_default().as_str(),
+                ),
                 ("format", "json"),
             ],
         )
         .expect("valid Musixmatch token URL");
         sign_url_with_date(&mut url, now);
 
-        let response = self
-            .inner
-            .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.inner.http.get(url).send().await?.error_for_status()?;
         let text = response.text().await?;
         let token = parse_body::<GetToken>(&text)?.user_token;
 
@@ -493,7 +500,9 @@ struct Header {
 }
 
 fn parse_body<T: DeserializeOwned>(response: &str) -> Result<T, Error> {
-    let header = serde_json::from_str::<Resp<HeaderMsg>>(response)?.message.header;
+    let header = serde_json::from_str::<Resp<HeaderMsg>>(response)?
+        .message
+        .header;
     if header.status_code < 400 {
         let body = serde_json::from_str::<Resp<BodyMsg<T>>>(response)?;
         Ok(body.message.body)
@@ -605,7 +614,9 @@ where
     D: Deserializer<'de>,
 {
     let value = Option::<String>::deserialize(deserializer)?;
-    Ok(value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()))
+    Ok(value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -688,7 +699,9 @@ mod tests {
             lyrics: Lyrics {
                 lyrics_id: 1,
                 lyrics_body: String::new(),
-                lyrics_copyright: Some("Unfortunately we're not authorized to show these lyrics".to_string()),
+                lyrics_copyright: Some(
+                    "Unfortunately we're not authorized to show these lyrics".to_string(),
+                ),
             },
         };
         let error = body.validate().expect_err("lyrics should be unavailable");

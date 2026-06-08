@@ -222,10 +222,7 @@ impl DeezerClient {
                 .await);
         }
 
-        let payload = match response
-            .json::<DeezerAuthResponse>()
-            .await
-        {
+        let payload = match response.json::<DeezerAuthResponse>().await {
             Ok(payload) => payload,
             Err(error) => return Err(self.auth_error(error.to_string()).await),
         };
