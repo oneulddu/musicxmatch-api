@@ -119,16 +119,21 @@ def patch_get_lyrics_state(text: str) -> str:
     if "let bestResult = null;" in text:
         return text
 
-    old = """            const trackId = info.uri?.split(':')[2];
+    method_start = text.find("        async getLyrics(info")
+    if method_start < 0:
+        raise SystemExit("Patch target block not found: getLyrics method")
 
-            // 디버그 로깅"""
-    new = """            const trackId = info.uri?.split(':')[2];
+    debug_anchor = "\n            // 디버그 로깅"
+    insert_at = text.find(debug_anchor, method_start)
+    if insert_at < 0:
+        raise SystemExit("Patch target block not found: best result state insertion")
+
+    state = """
             let bestResult = null;
             let bestScore = 0;
             let bestMeta = null;
-
-            // 디버그 로깅"""
-    return replace_once(text, old, new, "best result state insertion")
+"""
+    return text[:insert_at] + state + text[insert_at:]
 
 
 def patch_cache_source(text: str) -> str:

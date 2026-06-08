@@ -86,21 +86,25 @@ function Patch-GetLyricsState {
         return $Text
     }
 
-    $old = Normalize-Block @'
-            const trackId = info.uri?.split(':')[2];
+    $methodStart = $Text.IndexOf("        async getLyrics(info", [StringComparison]::Ordinal)
+    if ($methodStart -lt 0) {
+        throw "Patch target block not found: getLyrics method"
+    }
 
-            // 디버그 로깅
-'@
-    $new = Normalize-Block @'
-            const trackId = info.uri?.split(':')[2];
+    $debugAnchor = "`n            // 디버그 로깅"
+    $insertAt = $Text.IndexOf($debugAnchor, $methodStart, [StringComparison]::Ordinal)
+    if ($insertAt -lt 0) {
+        throw "Patch target block not found: best result state insertion"
+    }
+
+    $state = Normalize-Block @'
+
             let bestResult = null;
             let bestScore = 0;
             let bestMeta = null;
-
-            // 디버그 로깅
 '@
 
-    return Replace-Once $Text $old $new "best result state insertion"
+    return $Text.Substring(0, $insertAt) + $state + $Text.Substring($insertAt)
 }
 
 function Patch-CacheSource {
