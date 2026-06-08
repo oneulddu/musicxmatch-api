@@ -7,15 +7,19 @@ mod musixmatch;
 
 use std::collections::HashMap;
 use std::fs::{create_dir_all, OpenOptions};
-use std::net::SocketAddr;
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::extract::Request;
+use axum::extract::{ConnectInfo, Query, State};
+use axum::http::header::{CONTENT_TYPE, ORIGIN};
 use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method};
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{delete, get, post};
@@ -34,24 +38,32 @@ use matching::{
     score_track, strip_lyrics_footer, title_variants,
 };
 use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
+use reqwest::Url;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const ADDON_RESTORE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_UPDATE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 8092;
-const UPDATE_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
-const UPDATE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
-const UPDATE_LOCK_FORCE_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const PROVIDER_NAME: &str = "musicxmatch";
 const DEEZER_PROVIDER_NAME: &str = "deezer";
 const BUGS_PROVIDER_NAME: &str = "bugs";
 const GENIE_PROVIDER_NAME: &str = "genie";
 const VERSION_INFO_URL: &str =
     "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/version.json";
+const REPO_RAW_MAIN_URL: &str = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main";
+const GITHUB_MAIN_COMMIT_URL: &str =
+    "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main";
+const KNOWN_PROVIDER_ADDONS: [&str; 4] = [
+    "Addon_Lyrics_MusicXMatch.js",
+    "Addon_Lyrics_Deezer.js",
+    "Addon_Lyrics_Bugs.js",
+    "Addon_Lyrics_Genie.js",
+];
 #[derive(Clone)]
 struct AppState {
     mxm: Musixmatch,
@@ -193,12 +205,6 @@ enum BackendMode {
 }
 
 #[derive(Debug, Serialize)]
-struct ReadyPayload {
-    status: &'static str,
-    version: &'static str,
-}
-
-#[derive(Debug, Serialize)]
 struct UpdateCheckPayload {
     #[serde(rename = "currentVersion")]
     current_version: &'static str,
@@ -245,25 +251,31 @@ async fn main() {
     };
 
     spawn_cache_cleanup_task(state.cache.clone(), logger.clone());
+    spawn_addon_restore_task(logger.clone());
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/lyrics", get(get_lyrics))
+    let admin_routes = Router::new()
         .route("/cache", delete(clear_cache))
         .route("/config", get(get_config).post(save_config))
         .route("/update/check", get(update_check))
         .route("/update/apply", post(update_apply))
         .route("/update/apply-all", post(update_apply_all))
+        .route_layer(middleware::from_fn(admin_request_guard));
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/lyrics", get(get_lyrics))
+        .merge(admin_routes)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    is_trusted_origin(origin)
+                }))
+                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_headers([CONTENT_TYPE]),
         )
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = bind_addr(port, &logger);
     logger.log_tagged("Server", &format!("리스너 바인딩 준비: {addr}"));
     println!("ivLyrics MusicXMatch Server listening on http://{addr}");
 
@@ -271,9 +283,12 @@ async fn main() {
         .await
         .expect("failed to bind TCP listener");
     logger.log_tagged("Server", "리스너 바인딩 완료");
-    axum::serve(listener, app)
-        .await
-        .expect("server exited unexpectedly");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server exited unexpectedly");
 }
 
 fn build_client() -> Musixmatch {
@@ -298,6 +313,26 @@ fn provider_timeout(provider: &str, default_secs: u64) -> Duration {
         .or_else(|| read_timeout_secs("IVLYRICS_HTTP_TIMEOUT_SECS"))
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
+fn bind_addr(port: u16, logger: &Logger) -> SocketAddr {
+    let ip = match std::env::var("IVLYRICS_BIND_HOST") {
+        Ok(value) => match value.trim().parse::<IpAddr>() {
+            Ok(ip) => ip,
+            Err(error) => {
+                logger.log_tagged(
+                    "Server",
+                    &format!(
+                        "IVLYRICS_BIND_HOST 파싱 실패 value={value:?} detail={error}; 127.0.0.1 사용"
+                    ),
+                );
+                IpAddr::from([127, 0, 0, 1])
+            }
+        },
+        Err(_) => IpAddr::from([127, 0, 0, 1]),
+    };
+
+    SocketAddr::new(ip, port)
 }
 
 fn read_timeout_secs(key: &str) -> Option<u64> {
@@ -351,20 +386,68 @@ fn config_file_path() -> PathBuf {
     path
 }
 
-fn load_config(path: &PathBuf) -> AppConfig {
+fn load_config(path: &Path) -> AppConfig {
     match std::fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
         Err(_) => AppConfig::default(),
     }
 }
 
-fn save_config_file(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
+fn save_config_file(path: &Path, config: &AppConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
     let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
-    std::fs::write(path, bytes).map_err(|error| error.to_string())
+    write_private_file_atomic(path, &bytes)
+}
+
+fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("config.json");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(bytes).map_err(|error| error.to_string())?;
+        file.write_all(b"\n").map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        set_private_file_permissions(&temp_path)?;
+
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+
+        std::fs::rename(&temp_path, path).map_err(|error| error.to_string())?;
+        set_private_file_permissions(path)
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
 }
 
 fn deserialize_boolish_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
@@ -386,23 +469,9 @@ where
     }
 }
 
-async fn ready() -> Response {
-    json_response(
-        StatusCode::OK,
-        ReadyPayload {
-            status: "ok",
-            version: env!("CARGO_PKG_VERSION"),
-        },
-    )
-}
-
 async fn health(State(state): State<AppState>) -> Response {
     state.logger.log_tagged("Server", "GET /health 요청");
-    let update_available = latest_version_info()
-        .await
-        .map(|info| compare_versions(&info.server, env!("CARGO_PKG_VERSION")) > 0)
-        .unwrap_or(false);
-    let payload = health_payload(&state, update_available).await;
+    let payload = health_payload(&state, false).await;
     json_response(StatusCode::OK, payload)
 }
 
@@ -540,7 +609,7 @@ async fn get_lyrics(
             .into_response();
     }
 
-    let cache_key = build_cache_key(&title, &artist, &spotify_id, backend);
+    let cache_key = build_cache_key(&title, &artist, &spotify_id, query.duration_ms, backend);
     if let Some(cached) = cached_payload(&state, &cache_key).await {
         state.logger.log_tagged(
             provider_log_tag(cached.provider),
@@ -633,14 +702,10 @@ async fn update_apply(State(state): State<AppState>) -> Response {
                 command: update_server_command_lines(),
             },
         ),
-        Err(error) => {
-            let status = if error.contains("already in progress") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            json_response(status, ErrorPayload { detail: error })
-        }
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorPayload { detail: error },
+        ),
     }
 }
 
@@ -657,14 +722,10 @@ async fn update_apply_all(State(state): State<AppState>) -> Response {
                 command: update_all_command_lines(),
             },
         ),
-        Err(error) => {
-            let status = if error.contains("already in progress") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            json_response(status, ErrorPayload { detail: error })
-        }
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorPayload { detail: error },
+        ),
     }
 }
 
@@ -677,6 +738,93 @@ fn json_response<T: Serialize>(status: StatusCode, payload: T) -> Response {
             .expect("valid content-type header"),
     );
     response
+}
+
+async fn admin_request_guard(request: Request, next: Next) -> Response {
+    let remote_allowed = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().is_loopback())
+        .unwrap_or(true);
+
+    if !remote_allowed {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            ErrorPayload {
+                detail: "Admin endpoint is only available from loopback clients.".to_string(),
+            },
+        );
+    }
+
+    if let Some(origin) = request.headers().get(ORIGIN) {
+        if !is_trusted_origin(origin) {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                ErrorPayload {
+                    detail: "Origin is not allowed for admin endpoints.".to_string(),
+                },
+            );
+        }
+    }
+
+    next.run(request).await
+}
+
+fn is_trusted_origin(origin: &HeaderValue) -> bool {
+    origin.to_str().map(is_trusted_origin_str).unwrap_or(false)
+}
+
+fn is_trusted_origin_str(origin: &str) -> bool {
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return false;
+    }
+
+    if configured_allowed_origins()
+        .iter()
+        .any(|allowed| allowed == origin || allowed == "*")
+    {
+        return true;
+    }
+
+    let Ok(parsed) = Url::parse(origin) else {
+        return false;
+    };
+
+    match parsed.scheme() {
+        "http" | "https" => parsed
+            .host_str()
+            .map(|host| is_loopback_host(host) || is_trusted_spotify_host(host))
+            .unwrap_or(false),
+        "spicetify" | "spotify" | "app" | "file" | "tauri" => true,
+        _ => false,
+    }
+}
+
+fn configured_allowed_origins() -> Vec<String> {
+    std::env::var("IVLYRICS_ALLOWED_ORIGINS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(|part| part.trim().trim_end_matches('/').to_string())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn is_trusted_spotify_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("xpui.app.spotify.com")
 }
 
 async fn latest_version_info() -> Result<VersionInfo, String> {
@@ -781,6 +929,35 @@ fn runtime_path() -> String {
         .join(":")
 }
 
+#[cfg(target_os = "windows")]
+fn runtime_path() -> String {
+    let mut parts = Vec::new();
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        parts.push(local_app_data.join("spicetify").display().to_string());
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        parts.push(
+            user_profile
+                .join(".cargo")
+                .join("bin")
+                .display()
+                .to_string(),
+        );
+    }
+    if let Ok(existing) = std::env::var("PATH") {
+        parts.push(existing);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .filter(|part| seen.insert(part.clone()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 async fn current_deezer_arl(state: &AppState) -> Option<String> {
     if let Ok(value) = std::env::var("DEEZER_ARL") {
         let trimmed = value.trim();
@@ -854,145 +1031,6 @@ fn update_runner_script_path() -> PathBuf {
     path
 }
 
-fn update_lock_file_path() -> PathBuf {
-    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push(".ivlyrics-musicxmatch");
-    path.push("update.lock");
-    path
-}
-
-fn create_update_lock() -> Result<PathBuf, String> {
-    let lock_path = update_lock_file_path();
-    if let Some(parent) = lock_path.parent() {
-        create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    for attempt in 0..2 {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _ = writeln!(file, "pid={}", std::process::id());
-                return Ok(lock_path);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
-                if is_stale_update_lock(&lock_path) {
-                    let _ = std::fs::remove_file(&lock_path);
-                    continue;
-                }
-                return Err("An update is already in progress.".to_string());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err("An update is already in progress.".to_string());
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-
-    Err("An update is already in progress.".to_string())
-}
-
-fn is_stale_update_lock(lock_path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(lock_path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    let Ok(elapsed) = modified.elapsed() else {
-        return false;
-    };
-
-    if let Some(pid) = read_update_lock_pid(lock_path) {
-        if is_process_running(pid) {
-            return elapsed > UPDATE_LOCK_FORCE_STALE_AFTER;
-        }
-    }
-
-    elapsed > UPDATE_LOCK_STALE_AFTER
-}
-
-fn write_update_lock_pid(lock_path: &Path, pid: u32) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(lock_path)?;
-    writeln!(file, "pid={pid}")?;
-    file.flush()
-}
-
-fn read_update_lock_pid(lock_path: &Path) -> Option<u32> {
-    let contents = std::fs::read_to_string(lock_path).ok()?;
-    contents.lines().find_map(|line| {
-        let trimmed = line.trim();
-        let value = trimmed
-            .strip_prefix("pid")
-            .and_then(|value| value.trim_start().strip_prefix('='))
-            .unwrap_or(trimmed)
-            .trim();
-        if value.chars().all(|character| character.is_ascii_digit()) {
-            value.parse::<u32>().ok().filter(|pid| *pid > 0)
-        } else {
-            None
-        }
-    })
-}
-
-#[cfg(unix)]
-fn is_process_running(pid: u32) -> bool {
-    let Ok(output) = Command::new("kill")
-        .stdin(Stdio::null())
-        .arg("-0")
-        .arg(pid.to_string())
-        .output()
-    else {
-        return false;
-    };
-
-    output.status.success()
-        || String::from_utf8_lossy(&output.stderr)
-            .to_ascii_lowercase()
-            .contains("not permitted")
-}
-
-#[cfg(target_os = "windows")]
-fn is_process_running(pid: u32) -> bool {
-    Command::new("powershell.exe")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
-            ),
-        ])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn is_process_running(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(not(target_os = "windows"))]
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-#[cfg(target_os = "windows")]
-fn powershell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn update_server_command_lines() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
@@ -1024,56 +1062,29 @@ fn update_all_command_lines() -> Vec<String> {
 }
 
 fn spawn_update_process(include_addon: bool) -> Result<(), String> {
-    let lock_path = create_update_lock()?;
-
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let lock_literal = powershell_single_quote(&lock_path.display().to_string());
-        let skip_addons_line = if include_addon {
-            "".to_string()
+        let mut command_lines = if include_addon {
+            update_all_command_lines()
         } else {
-            "$env:IVLYRICS_SKIP_ADDONS = '1'".to_string()
+            update_server_command_lines()
         };
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'; \
-             Start-Sleep -Seconds 1; \
-             try {{ \
-               {skip_addons_line}; \
-               $installUrl = 'https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.ps1?ts=' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'); \
-               & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri $installUrl).Content)); \
-             }} finally {{ \
-               Remove-Item -LiteralPath {lock_literal} -Force -ErrorAction SilentlyContinue; \
-             }}"
+        let install_command = command_lines.drain(..).collect::<Vec<_>>().join("; ");
+        let command = format!(
+            "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 1; {}'",
+            install_command
         );
-
-        match Command::new("powershell.exe")
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        Command::new("powershell.exe")
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-WindowStyle",
-                "Hidden",
                 "-Command",
-                &script,
+                &command,
             ])
             .spawn()
-        {
-            Ok(child) => {
-                let _ = write_update_lock_pid(&lock_path, child.id());
-                Ok(())
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(lock_path);
-                Err(error.to_string())
-            }
-        }
+            .map_err(|error| error.to_string())?;
+        return Ok(());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1083,65 +1094,32 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
         let update_log = update_log_file_path();
         let runner_script = update_runner_script_path();
         if let Some(parent) = update_log.parent() {
-            create_dir_all(parent).map_err(|error| error.to_string())?;
+            let _ = create_dir_all(parent);
         }
         if let Some(parent) = runner_script.parent() {
             create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        rotate_file_if_too_large(&update_log, UPDATE_LOG_MAX_BYTES);
 
-        let install_url = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/install.sh?ts=$(date +%s)";
-        let lock_quoted = shell_single_quote(&lock_path.display().to_string());
-        let runner_quoted = shell_single_quote(&runner_script.display().to_string());
-        let update_log_quoted = shell_single_quote(&update_log.display().to_string());
-        let home_quoted = shell_single_quote(&home_dir.display().to_string());
-        let path_quoted = shell_single_quote(&path);
-        let addon_env = if include_addon {
-            ""
+        let mut script_lines = vec![
+            "#!/bin/sh".to_string(),
+            "set -eu".to_string(),
+            format!("export HOME='{}'", home_dir.display()),
+            format!("export PATH='{}'", path),
+            format!("echo \"[update] 시작 include_addon={include_addon}\""),
+            "echo \"[update] HOME=$HOME\"".to_string(),
+            "echo \"[update] PATH=$PATH\"".to_string(),
+            "sleep 1".to_string(),
+        ];
+
+        if include_addon {
+            script_lines.extend(update_all_command_lines());
         } else {
-            "IVLYRICS_SKIP_ADDONS=1 "
-        };
-        let script = format!(
-            r#"#!/bin/bash
-set -euo pipefail
-install_script=""
-update_log={update_log_quoted}
-max_log_bytes={UPDATE_LOG_MAX_BYTES}
+            script_lines.extend(update_server_command_lines());
+        }
 
-rotate_update_log() {{
-    if [ -f "$update_log" ] && [ "$(wc -c < "$update_log" 2>/dev/null || echo 0)" -gt "$max_log_bytes" ]; then
-        rm -f "$update_log.1"
-        mv "$update_log" "$update_log.1" 2>/dev/null || : > "$update_log"
-    fi
-}}
-
-cleanup() {{
-    rm -f {lock_quoted}
-    rm -f {runner_quoted}
-    if [ -n "${{install_script:-}}" ]; then
-        rm -f "$install_script"
-    fi
-}}
-
-trap cleanup EXIT INT TERM
-mkdir -p "$(dirname -- "$update_log")"
-exec > >(while IFS= read -r line; do rotate_update_log; printf '%s\n' "$line" >> "$update_log"; done) 2>&1
-
-export HOME={home_quoted}
-export PATH={path_quoted}
-echo "[update] 시작 include_addon={include_addon}"
-echo "[update] HOME=$HOME"
-echo "[update] PATH=$PATH"
-sleep 1
-install_script="$(mktemp "${{TMPDIR:-/tmp}}/ivlyrics-install.XXXXXX")"
-curl -fsSL "{install_url}" -o "$install_script"
-{addon_env}bash "$install_script"
-rm -f "$install_script"
-install_script=""
-echo "[update] 완료"
-"#
-        );
-        std::fs::write(&runner_script, script).map_err(|error| error.to_string())?;
+        script_lines.push("echo \"[update] 완료\"".to_string());
+        std::fs::write(&runner_script, format!("{}\n", script_lines.join("\n")))
+            .map_err(|error| error.to_string())?;
 
         #[cfg(unix)]
         {
@@ -1151,43 +1129,19 @@ echo "[update] 완료"
                 .map_err(|error| error.to_string())?;
         }
 
-        match Command::new("nohup")
-            .env("HOME", &home_dir)
-            .env("PATH", &path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .arg("bash")
-            .arg(&runner_script)
+        Command::new("sh")
+            .env("PATH", path)
+            .args([
+                "-c",
+                &format!(
+                    "nohup sh '{}' >> '{}' 2>&1 &",
+                    runner_script.display(),
+                    update_log.display()
+                ),
+            ])
             .spawn()
-        {
-            Ok(child) => {
-                let _ = write_update_lock_pid(&lock_path, child.id());
-                Ok(())
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(lock_path);
-                Err(error.to_string())
-            }
-        }
-    }
-}
-
-fn rotate_file_if_too_large(path: &Path, max_bytes: u64) {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return;
-    };
-    if metadata.len() <= max_bytes {
-        return;
-    }
-
-    let rotated = path.with_extension(match path.extension().and_then(|value| value.to_str()) {
-        Some(extension) if !extension.is_empty() => format!("{extension}.1"),
-        _ => "1".to_string(),
-    });
-    let _ = std::fs::remove_file(&rotated);
-    if std::fs::rename(path, &rotated).is_err() {
-        let _ = OpenOptions::new().write(true).truncate(true).open(path);
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
 
@@ -1239,6 +1193,391 @@ fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logg
     });
 }
 
+fn spawn_addon_restore_task(logger: Logger) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_UPDATE_TIMEOUT_SECS))
+            .build()
+            .ok();
+        let mut apply_pending = false;
+
+        loop {
+            match restore_known_provider_addons(client.as_ref()).await {
+                Ok(restored) if !restored.is_empty() => {
+                    apply_pending = true;
+                    logger.log_tagged(
+                        "Server",
+                        &format!(
+                            "ivLyrics provider 자동 복구 완료 files={}",
+                            restored.join(",")
+                        ),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => logger.log_tagged(
+                    "Server",
+                    &format!("ivLyrics provider 자동 복구 건너뜀 detail={error}"),
+                ),
+            }
+
+            if apply_pending {
+                match apply_spicetify_changes() {
+                    Ok(()) => {
+                        apply_pending = false;
+                        logger.log_tagged("Server", "spicetify apply 자동 실행 완료");
+                    }
+                    Err(error) => logger.log_tagged(
+                        "Server",
+                        &format!("spicetify apply 자동 실행 실패 detail={error}"),
+                    ),
+                }
+            }
+
+            tokio::time::sleep(ADDON_RESTORE_INTERVAL).await;
+        }
+    });
+}
+
+#[derive(Default)]
+struct SpotifyRestartState {
+    was_running: bool,
+    #[cfg(target_os = "windows")]
+    executable_path: Option<PathBuf>,
+}
+
+fn apply_spicetify_changes() -> Result<(), String> {
+    let spotify = stop_spotify_if_running();
+    let apply_result = run_spicetify_apply();
+    if spotify.was_running {
+        if let Err(error) = restart_spotify(&spotify) {
+            if apply_result.is_ok() {
+                return Err(error);
+            }
+        }
+    }
+    apply_result
+}
+
+fn run_spicetify_apply() -> Result<(), String> {
+    let output = Command::new("spicetify")
+        .arg("apply")
+        .env("PATH", runtime_path())
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(if detail.is_empty() {
+        format!("spicetify apply exited with {}", output.status)
+    } else {
+        detail
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let was_running = Command::new("pgrep")
+        .args(["-x", "Spotify"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if was_running {
+        let _ = Command::new("osascript")
+            .args(["-e", "tell application \"Spotify\" to quit"])
+            .output();
+        let _ = Command::new("pkill").args(["-x", "Spotify"]).output();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    SpotifyRestartState { was_running }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$p = Get-Process -Name Spotify -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $p) { exit 1 }; if ($p.Path) { Write-Output $p.Path }; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2",
+        ])
+        .output();
+
+    let Ok(output) = output else {
+        return SpotifyRestartState::default();
+    };
+    if !output.status.success() {
+        return SpotifyRestartState::default();
+    }
+
+    let executable_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    SpotifyRestartState {
+        was_running: true,
+        executable_path,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn stop_spotify_if_running() -> SpotifyRestartState {
+    let was_running = Command::new("pgrep")
+        .args(["-x", "spotify"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if was_running {
+        let _ = Command::new("pkill").args(["-x", "spotify"]).output();
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    SpotifyRestartState { was_running }
+}
+
+#[cfg(target_os = "macos")]
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
+    Command::new("open")
+        .args(["-a", "Spotify"])
+        .env("PATH", runtime_path())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn restart_spotify(spotify: &SpotifyRestartState) -> Result<(), String> {
+    if let Some(path) = spotify
+        .executable_path
+        .as_ref()
+        .filter(|path| path.exists())
+    {
+        return Command::new(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", "Start-Process spotify"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn restart_spotify(_spotify: &SpotifyRestartState) -> Result<(), String> {
+    Command::new("spotify")
+        .env("PATH", runtime_path())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn restore_known_provider_addons(
+    client: Option<&reqwest::Client>,
+) -> Result<Vec<String>, String> {
+    let Some((addon_dir, sources_path, manifest_path)) = ivlyrics_addon_paths() else {
+        return Ok(Vec::new());
+    };
+
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let sources = if sources_path.exists() {
+        read_json_value(&sources_path)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    let mut manifest = read_json_value(&manifest_path)?;
+    let mut manifest_changed = false;
+
+    if !manifest
+        .get("subfiles_extension")
+        .is_some_and(|value| value.is_array())
+    {
+        manifest["subfiles_extension"] = serde_json::Value::Array(Vec::new());
+        manifest_changed = true;
+    }
+
+    let subfiles = manifest
+        .get_mut("subfiles_extension")
+        .and_then(|value| value.as_array_mut())
+        .ok_or_else(|| "ivLyrics manifest subfiles_extension is missing or invalid".to_string())?;
+
+    create_dir_all(&addon_dir).map_err(|error| error.to_string())?;
+
+    let mut restored = Vec::new();
+    let mut restore_errors = Vec::new();
+    for filename in KNOWN_PROVIDER_ADDONS {
+        let source = sources
+            .get(filename)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let listed = subfiles
+            .iter()
+            .any(|value| value.as_str() == Some(filename));
+        let target_path = addon_dir.join(filename);
+        let file_exists = target_path.exists();
+        let needs_restore = !listed || !file_exists;
+
+        if !needs_restore {
+            continue;
+        }
+        let mut file_available = file_exists;
+
+        if let Some(source) = source {
+            match fetch_addon_source(client, &source).await {
+                Ok(content) => match std::fs::write(&target_path, content) {
+                    Ok(()) => {
+                        file_available = true;
+                        restored.push(filename.to_string());
+                    }
+                    Err(error) => {
+                        restore_errors.push(format!("{filename}: {}", error));
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    if file_exists {
+                        restored.push(filename.to_string());
+                    } else {
+                        restore_errors.push(format!("{filename}: {error}"));
+                        continue;
+                    }
+                }
+            }
+        } else if !file_available {
+            continue;
+        }
+
+        if !listed && file_available {
+            subfiles.push(serde_json::Value::String(filename.to_string()));
+            manifest_changed = true;
+            if file_exists {
+                restored.push(filename.to_string());
+            }
+        }
+    }
+
+    if manifest_changed {
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        std::fs::write(&manifest_path, [bytes.as_slice(), b"\n"].concat())
+            .map_err(|error| error.to_string())?;
+    }
+
+    restored.sort();
+    restored.dedup();
+    if restored.is_empty() && !restore_errors.is_empty() {
+        return Err(restore_errors.join("; "));
+    }
+    Ok(restored)
+}
+
+fn ivlyrics_addon_paths() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+        let addon_dir = base.join("spicetify").join("CustomApps").join("ivLyrics");
+        let sources_path = base
+            .join("spicetify")
+            .join("ivLyrics")
+            .join("addon_sources.json");
+        let manifest_path = addon_dir.join("manifest.json");
+        Some((addon_dir, sources_path, manifest_path))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir()?;
+        let addon_dir = home
+            .join(".config")
+            .join("spicetify")
+            .join("CustomApps")
+            .join("ivLyrics");
+        let sources_path = home
+            .join(".config")
+            .join("spicetify")
+            .join("ivLyrics")
+            .join("addon_sources.json");
+        let manifest_path = addon_dir.join("manifest.json");
+        Some((addon_dir, sources_path, manifest_path))
+    }
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
+    let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| error.to_string())
+}
+
+async fn fetch_addon_source(
+    client: Option<&reqwest::Client>,
+    source: &str,
+) -> Result<String, String> {
+    if let Some(path) = source.strip_prefix("local:") {
+        return std::fs::read_to_string(path).map_err(|error| error.to_string());
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let client = client.ok_or_else(|| "HTTP client is not available".to_string())?;
+        let mut download_url = source.to_string();
+        let repo_raw_main_prefix = format!("{REPO_RAW_MAIN_URL}/");
+        if let Some(relative_path) = source.strip_prefix(&repo_raw_main_prefix) {
+            if let Some(resolved_ref) = resolve_repo_main_ref(client).await {
+                download_url = format!(
+                    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/{resolved_ref}/{relative_path}"
+                );
+            }
+        }
+
+        let response = client
+            .get(download_url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("addon download returned {}", response.status()));
+        }
+        return response.text().await.map_err(|error| error.to_string());
+    }
+
+    std::fs::read_to_string(source).map_err(|error| error.to_string())
+}
+
+async fn resolve_repo_main_ref(client: &reqwest::Client) -> Option<String> {
+    let response = client
+        .get(GITHUB_MAIN_COMMIT_URL)
+        .header("User-Agent", "ivlyrics-musicxmatch-server")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .get("sha")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn set_private_file_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -1255,7 +1594,13 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
     }
 }
 
-fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: BackendMode) -> String {
+fn build_cache_key(
+    title: &str,
+    artist: &str,
+    spotify_id: &str,
+    duration_ms: Option<u64>,
+    backend: BackendMode,
+) -> String {
     let prefix = match backend {
         BackendMode::Auto => "auto",
         BackendMode::Musicxmatch => "musicxmatch",
@@ -1263,10 +1608,21 @@ fn build_cache_key(title: &str, artist: &str, spotify_id: &str, backend: Backend
         BackendMode::Bugs => "bugs",
         BackendMode::Genie => "genie",
     };
+    let duration_part = duration_ms
+        .map(|value| {
+            let rounded = ((value + 500) / 1000).max(1);
+            format!(":duration:{rounded}s")
+        })
+        .unwrap_or_default();
     if !spotify_id.is_empty() {
-        return format!("{prefix}:spotify:{spotify_id}");
+        return format!("{prefix}:spotify:{spotify_id}{duration_part}");
     }
-    format!("{prefix}:{}::{}", normalize(title), normalize(artist))
+    format!(
+        "{prefix}:{}::{}{}",
+        normalize(title),
+        normalize(artist),
+        duration_part
+    )
 }
 
 async fn fetch_payload(
@@ -1405,13 +1761,15 @@ async fn fetch_musixmatch_payload(
             None,
             "track_id",
             duration_secs,
-            include_debug.then(|| DebugPayload {
-                source: "spotify_id",
-                matched_by: "track_id",
-                duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                selected_track_id: None,
-                selected_track_duration_ms: None,
-                search_variants: Vec::new(),
+            include_debug.then(|| {
+                debug_payload(
+                    "spotify_id",
+                    "track_id",
+                    duration_secs,
+                    None,
+                    None,
+                    Vec::new(),
+                )
             }),
         )
         .await
@@ -1427,13 +1785,15 @@ async fn fetch_musixmatch_payload(
         Some(resolution.track),
         resolution.matched_by,
         duration_secs,
-        include_debug.then(|| DebugPayload {
-            source: "search",
-            matched_by: resolution.matched_by,
-            duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-            selected_track_id: None,
-            selected_track_duration_ms: None,
-            search_variants: resolution.search_variants,
+        include_debug.then(|| {
+            debug_payload(
+                "search",
+                resolution.matched_by,
+                duration_secs,
+                None,
+                None,
+                resolution.search_variants,
+            )
         }),
     )
     .await
@@ -1454,7 +1814,8 @@ async fn fetch_by_id(
     let mut debug = debug;
     if let Some(payload) = debug.as_mut() {
         payload.selected_track_id = Some(track.track_id);
-        payload.selected_track_duration_ms = Some(track.track_length.into());
+        payload.selected_track_duration_ms =
+            Some(u64::from(track.track_length).saturating_mul(1000));
     }
 
     let subtitle = mxm
@@ -1523,13 +1884,15 @@ async fn fetch_deezer_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "deezer_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "deezer_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1562,13 +1925,15 @@ async fn fetch_bugs_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "bugs_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "bugs_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1601,13 +1966,15 @@ async fn fetch_genie_payload(
                     text: payload.text,
                     cached: false,
                     matched_by: Some(resolution.matched_by),
-                    debug: include_debug.then(|| DebugPayload {
-                        source: "genie_search",
-                        matched_by: resolution.matched_by,
-                        duration_ms: duration_secs.map(|value| (value * 1000.0).round() as u64),
-                        selected_track_id: Some(payload.track_id),
-                        selected_track_duration_ms: payload.duration_ms,
-                        search_variants: resolution.search_variants.clone(),
+                    debug: include_debug.then(|| {
+                        debug_payload(
+                            "genie_search",
+                            resolution.matched_by,
+                            duration_secs,
+                            Some(payload.track_id),
+                            payload.duration_ms,
+                            resolution.search_variants.clone(),
+                        )
                     }),
                 });
             }
@@ -1617,6 +1984,28 @@ async fn fetch_genie_payload(
     }
 
     Err(GenieError::NotAvailable)
+}
+
+fn debug_payload(
+    source: &'static str,
+    matched_by: &'static str,
+    duration_secs: Option<f32>,
+    selected_track_id: Option<u64>,
+    selected_track_duration_ms: Option<u64>,
+    search_variants: Vec<String>,
+) -> DebugPayload {
+    DebugPayload {
+        source,
+        matched_by,
+        duration_ms: duration_ms_from_secs(duration_secs),
+        selected_track_id,
+        selected_track_duration_ms,
+        search_variants,
+    }
+}
+
+fn duration_ms_from_secs(duration_secs: Option<f32>) -> Option<u64> {
+    duration_secs.map(|value| (value * 1000.0).round() as u64)
 }
 
 struct TrackResolution {
@@ -1662,7 +2051,9 @@ async fn resolve_track(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_musixmatch_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &Track| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -1753,7 +2144,9 @@ async fn resolve_deezer_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_deezer_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &DeezerTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -1814,7 +2207,9 @@ async fn resolve_bugs_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_bugs_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &BugsTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -1876,7 +2271,9 @@ async fn resolve_genie_tracks(
             for track in tracks {
                 tracks_by_id.entry(track.track_id).or_insert(track);
             }
-            if has_exact_genie_candidate(&tracks_by_id, title, artist) {
+            if has_exact_candidate(&tracks_by_id, title, artist, |track: &GenieTrack| {
+                (&track.track_name, &track.artist_name)
+            }) {
                 break 'title_artist_search;
             }
         }
@@ -1938,73 +2335,32 @@ async fn search_tracks(
         .await
 }
 
-fn has_exact_musixmatch_candidate(
-    tracks_by_id: &HashMap<u64, Track>,
+fn has_exact_candidate<T, F>(
+    tracks_by_id: &HashMap<u64, T>,
     title: &str,
     artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_deezer_candidate(
-    tracks_by_id: &HashMap<u64, DeezerTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_bugs_candidate(
-    tracks_by_id: &HashMap<u64, BugsTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
-}
-
-fn has_exact_genie_candidate(
-    tracks_by_id: &HashMap<u64, GenieTrack>,
-    title: &str,
-    artist: &str,
-) -> bool {
-    tracks_by_id
-        .values()
-        .any(|track| exact_title_artist_match(&track.track_name, &track.artist_name, title, artist))
+    track_fields: F,
+) -> bool
+where
+    F: for<'a> Fn(&'a T) -> (&'a str, &'a str),
+{
+    tracks_by_id.values().any(|track| {
+        let (track_name, artist_name) = track_fields(track);
+        exact_title_artist_match(track_name, artist_name, title, artist)
+    })
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
-        LyricsError::Bugs(BugsError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Bugs(BugsError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
-        LyricsError::Bugs(BugsError::Ratelimit) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Bugs rate limit reached. Wait a minute and try again.".to_string(),
-        ),
+        LyricsError::Bugs(BugsError::NotFound) => no_tracks_found(),
+        LyricsError::Bugs(BugsError::NotAvailable) => no_lyrics_available(),
+        LyricsError::Bugs(BugsError::Ratelimit) => rate_limit("Bugs"),
         LyricsError::Bugs(BugsError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Bugs error: {detail}"))
         }
-        LyricsError::Genie(GenieError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Genie(GenieError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
-        LyricsError::Genie(GenieError::Ratelimit) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Genie rate limit reached. Wait a minute and try again.".to_string(),
-        ),
+        LyricsError::Genie(GenieError::NotFound) => no_tracks_found(),
+        LyricsError::Genie(GenieError::NotAvailable) => no_lyrics_available(),
+        LyricsError::Genie(GenieError::Ratelimit) => rate_limit("Genie"),
         LyricsError::Genie(GenieError::Provider(detail)) => {
             (StatusCode::BAD_GATEWAY, format!("Genie error: {detail}"))
         }
@@ -2012,13 +2368,8 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             StatusCode::SERVICE_UNAVAILABLE,
             "Deezer ARL cookie is not configured.".to_string(),
         ),
-        LyricsError::Deezer(DeezerError::NotFound) => {
-            (StatusCode::NOT_FOUND, "No tracks found".to_string())
-        }
-        LyricsError::Deezer(DeezerError::NotAvailable) => (
-            StatusCode::NOT_FOUND,
-            "No lyrics are available for this track".to_string(),
-        ),
+        LyricsError::Deezer(DeezerError::NotFound) => no_tracks_found(),
+        LyricsError::Deezer(DeezerError::NotAvailable) => no_lyrics_available(),
         LyricsError::Deezer(DeezerError::Auth(detail)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("Deezer authentication failed: {detail}"),
@@ -2027,15 +2378,9 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             (StatusCode::BAD_GATEWAY, format!("Deezer error: {detail}"))
         }
         LyricsError::Musixmatch(error) => match error {
-            MxmError::NotFound => (StatusCode::NOT_FOUND, "No tracks found".to_string()),
-            MxmError::NotAvailable => (
-                StatusCode::NOT_FOUND,
-                "No lyrics are available for this track".to_string(),
-            ),
-            MxmError::Ratelimit => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Musixmatch rate limit reached. Wait a minute and try again.".to_string(),
-            ),
+            MxmError::NotFound => no_tracks_found(),
+            MxmError::NotAvailable => no_lyrics_available(),
+            MxmError::Ratelimit => rate_limit("Musixmatch"),
             MxmError::TokenExpired => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Musixmatch session expired. Retry in a moment.".to_string(),
@@ -2047,6 +2392,24 @@ fn map_error(error: LyricsError) -> (StatusCode, String) {
             other => (StatusCode::BAD_GATEWAY, other.to_string()),
         },
     }
+}
+
+fn no_tracks_found() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "No tracks found".to_string())
+}
+
+fn no_lyrics_available() -> (StatusCode, String) {
+    (
+        StatusCode::NOT_FOUND,
+        "No lyrics are available for this track".to_string(),
+    )
+}
+
+fn rate_limit(provider: &str) -> (StatusCode, String) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("{provider} rate limit reached. Wait a minute and try again."),
+    )
 }
 
 #[cfg(test)]
@@ -2147,11 +2510,11 @@ mod tests {
 
     #[test]
     fn cache_keys_include_backend_mode() {
-        let auto = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Auto);
-        let mxm = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Musicxmatch);
-        let deezer = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Deezer);
-        let bugs = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Bugs);
-        let genie = build_cache_key("Tell Me", "CAMO", "abc", BackendMode::Genie);
+        let auto = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Auto);
+        let mxm = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Musicxmatch);
+        let deezer = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Deezer);
+        let bugs = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Bugs);
+        let genie = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Genie);
         assert_ne!(auto, mxm);
         assert_ne!(mxm, deezer);
         assert_ne!(auto, deezer);
@@ -2162,10 +2525,30 @@ mod tests {
     }
 
     #[test]
+    fn cache_keys_include_duration_when_available() {
+        let short = build_cache_key("Tell Me", "CAMO", "", Some(180_100), BackendMode::Auto);
+        let long = build_cache_key("Tell Me", "CAMO", "", Some(240_100), BackendMode::Auto);
+        let unknown_duration = build_cache_key("Tell Me", "CAMO", "", None, BackendMode::Auto);
+
+        assert_ne!(short, long);
+        assert_ne!(short, unknown_duration);
+        assert!(short.ends_with(":duration:180s"));
+    }
+
+    #[test]
     fn mask_secret_preserves_only_edges() {
         assert_eq!(mask_secret(""), "");
         assert_eq!(mask_secret("abcd"), "••••");
         assert_eq!(mask_secret("abcdefghijkl"), "abcd…ijkl");
+    }
+
+    #[test]
+    fn trusted_origin_rejects_regular_websites() {
+        assert!(is_trusted_origin_str("spicetify://ivlyrics"));
+        assert!(is_trusted_origin_str("https://xpui.app.spotify.com"));
+        assert!(is_trusted_origin_str("http://127.0.0.1:8092"));
+        assert!(!is_trusted_origin_str("null"));
+        assert!(!is_trusted_origin_str("https://example.com"));
     }
 
     #[test]
@@ -2326,7 +2709,7 @@ mod tests {
     async fn get_lyrics_returns_cached_payload_without_network_fetch() {
         let config_path = test_path("config");
         let state = test_state(AppConfig::default(), config_path);
-        let cache_key = build_cache_key("Tell Me", "CAMO", "spotify123", BackendMode::Deezer);
+        let cache_key = build_cache_key("Tell Me", "CAMO", "spotify123", None, BackendMode::Deezer);
 
         store_cache(
             &state,

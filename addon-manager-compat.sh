@@ -1,11 +1,6 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -eq 0 ]; then
-    echo "Usage: addon-manager-compat.sh <addon-url> [<addon-url> ...]" >&2
-    exit 1
-fi
-
 if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 is required." >&2
     exit 1
@@ -15,6 +10,19 @@ ADDON_DIR="${HOME}/.config/spicetify/CustomApps/ivLyrics"
 SOURCES_DIR="${HOME}/.config/spicetify/ivLyrics"
 MANIFEST_PATH="${ADDON_DIR}/manifest.json"
 SOURCES_PATH="${SOURCES_DIR}/addon_sources.json"
+REPO_RAW_MAIN_PREFIX="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
+KNOWN_ADDONS="Addon_Lyrics_MusicXMatch.js Addon_Lyrics_Deezer.js Addon_Lyrics_Bugs.js Addon_Lyrics_Genie.js"
+RESTORE_FROM_SOURCES=0
+resolved_ref=""
+
+if [ "$#" -gt 0 ] && { [ "$1" = "--restore" ] || [ "$1" = "--restore-existing" ]; }; then
+    RESTORE_FROM_SOURCES=1
+    shift
+fi
+
+if [ "$#" -eq 0 ] && [ "$RESTORE_FROM_SOURCES" -eq 0 ]; then
+    RESTORE_FROM_SOURCES=1
+fi
 
 if [ ! -f "$MANIFEST_PATH" ]; then
     echo "ivLyrics manifest not found at $MANIFEST_PATH" >&2
@@ -24,73 +32,24 @@ fi
 mkdir -p "$ADDON_DIR" "$SOURCES_DIR"
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ivlyrics-addon-compat.XXXXXX")"
-BACKUP_DIR="$TMP_DIR/backup"
-BACKUP_LIST="$TMP_DIR/backup-list"
-BACKUP_INDEX=0
-REPO_RAW_MAIN_PREFIX="https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
-PATCH_SCRIPT_PATH="scripts/patch-ivlyrics-selection.sh"
-resolved_ref=""
-
-mkdir -p "$BACKUP_DIR"
-: > "$BACKUP_LIST"
 
 spotify_was_running=0
 
-is_spotify_running() {
-    pgrep -x "Spotify" >/dev/null 2>&1 || pgrep -x "spotify" >/dev/null 2>&1
-}
-
 stop_spotify_if_running() {
-    if is_spotify_running; then
+    if pgrep -x "Spotify" >/dev/null 2>&1; then
         spotify_was_running=1
         if command -v osascript >/dev/null 2>&1; then
             osascript -e 'tell application "Spotify" to quit' >/dev/null 2>&1 || true
         fi
         pkill -x "Spotify" >/dev/null 2>&1 || true
-        pkill -x "spotify" >/dev/null 2>&1 || true
         sleep 2
     fi
 }
 
 restart_spotify_if_needed() {
-    if [ "$spotify_was_running" -ne 1 ]; then
-        return
+    if [ "$spotify_was_running" -eq 1 ]; then
+        open -a Spotify >/dev/null 2>&1 || true
     fi
-    spotify_was_running=0
-    if command -v open >/dev/null 2>&1; then
-        open -a Spotify >/dev/null 2>&1 && return
-    fi
-    if command -v spotify >/dev/null 2>&1; then
-        spotify >/dev/null 2>&1 &
-    fi
-}
-
-backup_path() {
-    path="$1"
-    BACKUP_INDEX=$((BACKUP_INDEX + 1))
-    backup_file="$BACKUP_DIR/$BACKUP_INDEX"
-    printf '%s
-%s
-' "$path" "$backup_file" >> "$BACKUP_LIST"
-    if [ -e "$path" ]; then
-        cp -p "$path" "$backup_file"
-    else
-        : > "$backup_file.missing"
-    fi
-}
-
-restore_backups() {
-    if [ ! -f "$BACKUP_LIST" ]; then
-        return
-    fi
-    while IFS= read -r path && IFS= read -r backup_file; do
-        if [ -f "$backup_file.missing" ]; then
-            rm -f "$path"
-        elif [ -f "$backup_file" ]; then
-            mkdir -p "$(dirname -- "$path")"
-            cp -p "$backup_file" "$path"
-        fi
-    done < "$BACKUP_LIST"
 }
 
 cleanup() {
@@ -111,6 +70,50 @@ resolve_repo_ref() {
     )"
 }
 
+if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+    RESTORE_URLS_PATH="$TMP_DIR/restore_urls.txt"
+    python3 - "$SOURCES_PATH" "$RESTORE_URLS_PATH" $KNOWN_ADDONS <<'PY'
+import json
+import sys
+from pathlib import Path
+
+sources_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+known = sys.argv[3:]
+if not sources_path.exists():
+    sys.exit(0)
+
+try:
+    sources = json.loads(sources_path.read_text())
+except (json.JSONDecodeError, OSError):
+    sys.exit(0)
+
+if not isinstance(sources, dict):
+    sys.exit(0)
+
+with output_path.open("w", encoding="utf-8") as output:
+    for name in known:
+        url = sources.get(name)
+        if isinstance(url, str) and (url.startswith("http") or url.startswith("local:")):
+            output.write(url + "\n")
+PY
+    if [ -f "$RESTORE_URLS_PATH" ]; then
+        while IFS= read -r restored_url || [ -n "$restored_url" ]; do
+            [ -n "$restored_url" ] || continue
+            set -- "$@" "$restored_url"
+        done < "$RESTORE_URLS_PATH"
+    fi
+fi
+
+if [ "$#" -eq 0 ]; then
+    echo "No addon URLs were provided and no restorable provider sources were found." >&2
+    echo "Usage: addon-manager-compat.sh [--restore] <addon-url> [<addon-url> ...]" >&2
+    exit 1
+fi
+
+SUCCESS_URLS_PATH="$TMP_DIR/success_urls.txt"
+: > "$SUCCESS_URLS_PATH"
+
 for url in "$@"; do
     clean_url="${url%%\?*}"
     filename=$(basename "$clean_url")
@@ -119,6 +122,9 @@ for url in "$@"; do
         *.js) ;;
         *)
             echo "Invalid addon URL: $url" >&2
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                continue
+            fi
             exit 1
             ;;
     esac
@@ -145,19 +151,51 @@ for url in "$@"; do
             ;;
     esac
 
-    curl -fsSL "$download_url" -o "$TMP_DIR/$filename"
+    case "$clean_url" in
+        local:*)
+            local_path="${clean_url#local:}"
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ] && [ -f "$ADDON_DIR/$filename" ]; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            elif cp "$local_path" "$TMP_DIR/$filename"; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            else
+                if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                    echo "Skipping stale addon source: $url" >&2
+                else
+                    echo "Failed to download addon source: $url" >&2
+                    exit 1
+                fi
+            fi
+            ;;
+        *)
+            if [ "$RESTORE_FROM_SOURCES" -eq 1 ] && [ -f "$ADDON_DIR/$filename" ]; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            elif curl -fsSL "$download_url" -o "$TMP_DIR/$filename"; then
+                printf '%s\n' "$url" >> "$SUCCESS_URLS_PATH"
+            else
+                if [ "$RESTORE_FROM_SOURCES" -eq 1 ]; then
+                    echo "Skipping stale addon source: $url" >&2
+                else
+                    echo "Failed to download addon source: $url" >&2
+                    exit 1
+                fi
+            fi
+            ;;
+    esac
 done
 
-backup_path "$SOURCES_PATH"
-backup_path "$MANIFEST_PATH"
-backup_path "$ADDON_DIR/LyricsAddonManager.js"
-for url in "$@"; do
-    clean_url="${url%%\?*}"
-    filename=$(basename "$clean_url")
-    backup_path "$ADDON_DIR/$filename"
-done
+set --
+while IFS= read -r restored_url || [ -n "$restored_url" ]; do
+    [ -n "$restored_url" ] || continue
+    set -- "$@" "$restored_url"
+done < "$SUCCESS_URLS_PATH"
 
-if ! python3 - "$ADDON_DIR" "$SOURCES_PATH" "$MANIFEST_PATH" "$TMP_DIR" "$@" <<'PY'
+if [ "$#" -eq 0 ]; then
+    echo "No addon files could be restored or registered." >&2
+    exit 1
+fi
+
+python3 - "$ADDON_DIR" "$SOURCES_PATH" "$MANIFEST_PATH" "$TMP_DIR" "$@" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -180,63 +218,33 @@ subfiles = manifest.get("subfiles_extension", [])
 if not isinstance(subfiles, list):
     subfiles = []
 
+registered = []
 for url in urls:
     clean_url = url.split("?")[0]
     filename = clean_url.rsplit("/", 1)[-1]
     source_file = tmp_dir / filename
     target_file = addon_dir / filename
-    target_file.write_text(source_file.read_text())
+    if source_file.exists():
+        target_file.write_text(source_file.read_text())
+    elif not target_file.exists():
+        continue
     sources[filename] = clean_url
     if filename not in subfiles:
         subfiles.append(filename)
+    registered.append(filename)
 
 manifest["subfiles_extension"] = subfiles
 sources_path.write_text(json.dumps(sources, indent=4, ensure_ascii=False) + "\n")
 manifest_path.write_text(json.dumps(manifest, indent="\t", ensure_ascii=False) + "\n")
 
 print("Registered addons:")
-for url in urls:
-    print(f" - {url.split('?')[0].rsplit('/', 1)[-1]}")
+for filename in registered:
+    print(f" - {filename}")
 PY
-then
-    :
-else
-    restore_backups
-    exit 1
-fi
 
 if command -v spicetify >/dev/null 2>&1; then
-    patch_script="$TMP_DIR/patch-ivlyrics-selection.sh"
-    patch_url="${REPO_RAW_MAIN_PREFIX}${PATCH_SCRIPT_PATH}"
-    local_patch_script=""
-
-    if [ -n "${0:-}" ] && [ "${0#-}" = "$0" ]; then
-        script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)"
-        if [ -n "$script_dir" ] && [ -f "$script_dir/$PATCH_SCRIPT_PATH" ]; then
-            local_patch_script="$script_dir/$PATCH_SCRIPT_PATH"
-        fi
-    fi
-    if [ -z "$local_patch_script" ] && [ -f "./$PATCH_SCRIPT_PATH" ]; then
-        local_patch_script="./$PATCH_SCRIPT_PATH"
-    fi
-
-    if [ -n "$local_patch_script" ]; then
-        if ! sh "$local_patch_script" --no-apply "$ADDON_DIR/LyricsAddonManager.js"; then
-            echo "ivLyrics selection patch failed; continuing without it." >&2
-        fi
-    elif curl -fsSL "$patch_url?ts=$(date +%s)" -o "$patch_script"; then
-        if ! sh "$patch_script" --no-apply "$ADDON_DIR/LyricsAddonManager.js"; then
-            echo "ivLyrics selection patch failed; continuing without it." >&2
-        fi
-    else
-        echo "ivLyrics selection patch download failed; continuing without it." >&2
-    fi
-
     stop_spotify_if_running
-    if ! spicetify apply; then
-        restore_backups
-        exit 1
-    fi
+    spicetify apply
 else
     echo "spicetify not found; addon files were registered but apply was skipped." >&2
 fi

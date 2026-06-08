@@ -47,7 +47,7 @@
 <td width="50%">
 
 ### 🔄 자동 시작
-- 사용자 로그인 시 백그라운드 실행
+- OS 부팅 시 백그라운드 실행
 - 별도 설정 없이 즉시 사용
 - 안정적인 서비스 제공
 
@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/insta
 설치 스크립트는 다음을 자동으로 수행합니다:
 
 1. ✅ 로컬 서버 설치 (`http://127.0.0.1:8092`)
-2. ✅ 사용자 로그인 시 자동 시작 설정
+2. ✅ OS 부팅 시 자동 시작 설정
 3. ✅ 서버 health check 및 CORS 검증
 4. ✅ 4개 provider addon 자동 등록
 5. ✅ `spicetify apply` 자동 적용
@@ -206,6 +206,23 @@ curl -fsSL "$base/addon-manager-compat.sh" | sh -s -- \
 curl -fsSL https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh | sh -s -- \
   "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/Addon_Lyrics_Genie.js"
 ```
+
+### ivLyrics 업데이트 후 provider 복구
+
+ivLyrics 업데이트가 `manifest.json`을 새로 쓰면 커스텀 provider 등록이 빠질 수 있습니다.
+한 번 등록했던 기록은 `addon_sources.json`에 남기 때문에, 아래 명령으로 기존 provider를 다시 복구할 수 있습니다.
+
+**Windows**
+```powershell
+& ([scriptblock]::Create((iwr -useb "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.ps1").Content)) --restore
+```
+
+**macOS / Linux**
+```bash
+curl -fsSL "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/addon-manager-compat.sh" | sh -s -- --restore
+```
+
+`--restore`를 생략하고 스크립트만 실행해도 같은 복구 모드로 동작합니다. 서버의 자동 복구 루프도 provider를 되살린 뒤 Spotify를 잠시 종료하고 `spicetify apply`를 실행한 다음, Spotify가 켜져 있었다면 다시 실행합니다.
 
 ---
 

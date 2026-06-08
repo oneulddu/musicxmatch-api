@@ -1,62 +1,35 @@
 param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-    [string[]]$Urls
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Args
 )
-
-$ErrorActionPreference = "Stop"
 
 $addonDir = "$env:LOCALAPPDATA\spicetify\CustomApps\ivLyrics"
 $sourcesDir = "$env:LOCALAPPDATA\spicetify\ivLyrics"
 $manifestPath = Join-Path $addonDir "manifest.json"
 $sourcesPath = Join-Path $sourcesDir "addon_sources.json"
 $repoRawMainPrefix = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main/"
-$patchScriptPath = "scripts/patch-ivlyrics-selection.ps1"
+$knownAddons = @(
+    "Addon_Lyrics_MusicXMatch.js",
+    "Addon_Lyrics_Deezer.js",
+    "Addon_Lyrics_Bugs.js",
+    "Addon_Lyrics_Genie.js"
+)
 $resolvedRef = $null
 $spotifyWasRunning = $false
-$spotifyPaths = @()
-$backupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ivlyrics-addon-backup-" + [guid]::NewGuid().ToString("N"))
-$backups = @{}
-
-function Backup-FileForRollback {
-    param([string]$Path)
-
-    if ($backups.ContainsKey($Path)) {
-        return
-    }
-
-    if (Test-Path -LiteralPath $Path) {
-        New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-        $backupPath = Join-Path $backupDir ([guid]::NewGuid().ToString("N"))
-        Copy-Item -LiteralPath $Path -Destination $backupPath -Force
-        $backups[$Path] = $backupPath
-    } else {
-        $backups[$Path] = $null
-    }
-}
-
-function Restore-Backups {
-    foreach ($path in $backups.Keys) {
-        $backupPath = $backups[$path]
-        if ($backupPath -and (Test-Path -LiteralPath $backupPath)) {
-            Copy-Item -LiteralPath $backupPath -Destination $path -Force
-        } elseif (Test-Path -LiteralPath $path) {
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
+$spotifyPath = $null
+$restoreFromSources = $false
+$Urls = @()
 
 function Stop-SpotifyIfRunning {
-    $processes = @(Get-Process -Name Spotify -ErrorAction SilentlyContinue)
-    if ($processes.Count -eq 0) {
-        return
+    try {
+        $spotifyProcess = Get-Process -Name Spotify -ErrorAction Stop | Select-Object -First 1
+        $script:spotifyWasRunning = $true
+        $script:spotifyPath = $spotifyProcess.Path
+        Stop-Process -Id $spotifyProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    } catch {
+        $script:spotifyWasRunning = $false
     }
-
-    $script:spotifyWasRunning = $true
-    $script:spotifyPaths = @($processes | ForEach-Object { $_.Path } | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
-    foreach ($process in $processes) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 2
 }
 
 function Restart-SpotifyIfNeeded {
@@ -64,133 +37,164 @@ function Restart-SpotifyIfNeeded {
         return
     }
 
-    $started = $false
-    foreach ($path in $script:spotifyPaths) {
-        if ($path -and (Test-Path -LiteralPath $path)) {
-            Start-Process -FilePath $path | Out-Null
-            $started = $true
-            break
+    try {
+        if ($script:spotifyPath -and (Test-Path -LiteralPath $script:spotifyPath)) {
+            Start-Process -FilePath $script:spotifyPath | Out-Null
+        } else {
+            Start-Process "spotify" | Out-Null
         }
-    }
-    if (-not $started) {
-        Start-Process "spotify" -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        Write-Warning "Failed to restart Spotify: $_"
     }
 }
 
-if (-not (Test-Path -LiteralPath $manifestPath)) {
+if ($Args.Count -gt 0 -and ($Args[0] -eq "--restore" -or $Args[0] -eq "--restore-existing")) {
+    $restoreFromSources = $true
+    if ($Args.Count -gt 1) {
+        $Urls = $Args[1..($Args.Count - 1)]
+    }
+} else {
+    $Urls = $Args
+}
+
+if ($Urls.Count -eq 0) {
+    $restoreFromSources = $true
+}
+
+if (-not (Test-Path $manifestPath)) {
     throw "ivLyrics manifest not found at $manifestPath"
 }
 
 New-Item -ItemType Directory -Force -Path $addonDir | Out-Null
 New-Item -ItemType Directory -Force -Path $sourcesDir | Out-Null
 
-try {
-    $sources = @{}
-    if (Test-Path -LiteralPath $sourcesPath) {
-        $existing = Get-Content -LiteralPath $sourcesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$sources = @{}
+if (Test-Path $sourcesPath) {
+    try {
+        $existing = Get-Content -Path $sourcesPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($existing) {
             $existing.PSObject.Properties | ForEach-Object {
                 $sources[$_.Name] = $_.Value
             }
         }
+    } catch {
+        $sources = @{}
+    }
+}
+
+if ($restoreFromSources) {
+    foreach ($name in $knownAddons) {
+        if ($sources.ContainsKey($name) -and $sources[$name] -is [string] -and ($sources[$name].StartsWith("http") -or $sources[$name].StartsWith("local:"))) {
+            $Urls += $sources[$name]
+        }
+    }
+}
+
+if ($Urls.Count -eq 0) {
+    throw "No addon URLs were provided and no restorable provider sources were found. Usage: addon-manager-compat.ps1 [--restore] <addon-url> [<addon-url> ...]"
+}
+
+$manifest = Get-Content -Path $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $manifest.subfiles_extension) {
+    $manifest | Add-Member -NotePropertyName subfiles_extension -NotePropertyValue @()
+}
+
+$registered = @()
+foreach ($url in $Urls) {
+    $cleanUrl = ($url -split '\?')[0]
+    $fileName = [System.IO.Path]::GetFileName($cleanUrl)
+    $downloadUrl = $url
+
+    if (-not $fileName -or -not $fileName.EndsWith('.js')) {
+        if ($restoreFromSources) {
+            Write-Warning "Skipping invalid addon source: $url"
+            continue
+        }
+        throw "Invalid addon URL: $url"
     }
 
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not ($manifest.PSObject.Properties.Name -contains "subfiles_extension")) {
-        $manifest | Add-Member -NotePropertyName subfiles_extension -NotePropertyValue @()
-    } elseif ($null -eq $manifest.subfiles_extension) {
-        $manifest.subfiles_extension = @()
-    }
-
-    foreach ($url in $Urls) {
-        $cleanUrl = ($url -split '\?')[0]
-        $fileName = [System.IO.Path]::GetFileName($cleanUrl)
-        $downloadUrl = $url
-
-        if (-not $fileName -or -not $fileName.EndsWith('.js')) {
-            throw "Invalid addon URL: $url"
+    if ($cleanUrl.StartsWith($repoRawMainPrefix)) {
+        if (-not $resolvedRef) {
+            try {
+                $resolvedRef = (Invoke-RestMethod -Uri "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main" -UseBasicParsing).sha
+            } catch {
+                $resolvedRef = $null
+            }
         }
 
-        if ($cleanUrl.StartsWith($repoRawMainPrefix)) {
-            if (-not $resolvedRef) {
-                try {
-                    $resolvedRef = (Invoke-RestMethod -Uri "https://api.github.com/repos/oneulddu/musicxmatch-api/commits/main" -UseBasicParsing).sha
-                } catch {
-                    $resolvedRef = $null
-                }
-            }
-
-            if ($resolvedRef) {
-                $relativePath = $cleanUrl.Substring($repoRawMainPrefix.Length)
-                $downloadUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/$resolvedRef/$relativePath"
-            } else {
-                $separator = '?'
-                if ($url.Contains('?')) {
-                    $separator = '&'
-                }
-                $downloadUrl = "$url$separator" + "ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-            }
-        } elseif ($cleanUrl.StartsWith('https://raw.githubusercontent.com/')) {
+        if ($resolvedRef) {
+            $relativePath = $cleanUrl.Substring($repoRawMainPrefix.Length)
+            $downloadUrl = "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/$resolvedRef/$relativePath"
+        } else {
             $separator = '?'
             if ($url.Contains('?')) {
                 $separator = '&'
             }
             $downloadUrl = "$url$separator" + "ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
         }
-
-        $destination = Join-Path $addonDir $fileName
-        Backup-FileForRollback -Path $destination
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing
-        $sources[$fileName] = $cleanUrl
-
-        if ($manifest.subfiles_extension -notcontains $fileName) {
-            $manifest.subfiles_extension += $fileName
+    } elseif ($cleanUrl.StartsWith('https://raw.githubusercontent.com/')) {
+        $separator = '?'
+        if ($url.Contains('?')) {
+            $separator = '&'
         }
+        $downloadUrl = "$url$separator" + "ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
     }
 
-    Backup-FileForRollback -Path $sourcesPath
-    Backup-FileForRollback -Path $manifestPath
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($sourcesPath, (($sources | ConvertTo-Json -Depth 5) + "`r`n"), $utf8NoBom)
-    [System.IO.File]::WriteAllText($manifestPath, (($manifest | ConvertTo-Json -Depth 20) + "`r`n"), $utf8NoBom)
-
-    Write-Host "Registered addons:"
-    foreach ($url in $Urls) {
-        Write-Host " - $([System.IO.Path]::GetFileName(($url -split '\?')[0]))"
-    }
-
-    if (Get-Command spicetify -ErrorAction SilentlyContinue) {
-        $lyricsManagerPath = Join-Path $addonDir "LyricsAddonManager.js"
-        if (Test-Path -LiteralPath $lyricsManagerPath) {
-            Backup-FileForRollback -Path $lyricsManagerPath
-            try {
-                $localPatchScript = Join-Path (Get-Location) $patchScriptPath
-                if (Test-Path -LiteralPath $localPatchScript) {
-                    & $localPatchScript -TargetPath $lyricsManagerPath -NoApply
-                } else {
-                    $patchUrl = "$repoRawMainPrefix$patchScriptPath" + "?ts=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-                    $patchScript = [scriptblock]::Create((Invoke-WebRequest -Uri $patchUrl -UseBasicParsing).Content)
-                    & $patchScript -TargetPath $lyricsManagerPath -NoApply
-                }
-            } catch {
-                Write-Warning "ivLyrics selection patch failed; continuing without it. $($_.Exception.Message)"
+    $destination = Join-Path $addonDir $fileName
+    if (-not ($restoreFromSources -and (Test-Path -LiteralPath $destination))) {
+        try {
+            if ($cleanUrl.StartsWith("local:")) {
+                $localPath = $cleanUrl.Substring("local:".Length)
+                Copy-Item -LiteralPath $localPath -Destination $destination -Force -ErrorAction Stop
+            } else {
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $destination -UseBasicParsing -ErrorAction Stop
             }
+        } catch {
+            if ($restoreFromSources) {
+                Write-Warning "Skipping stale addon source: $url"
+                continue
+            }
+            throw
         }
+    }
 
-        Stop-SpotifyIfRunning
-        spicetify apply
-        if ($LASTEXITCODE -ne 0) {
-            throw "spicetify apply failed with exit code $LASTEXITCODE"
+    if (-not (Test-Path -LiteralPath $destination)) {
+        if ($restoreFromSources) {
+            Write-Warning "Skipping unavailable addon source: $url"
+            continue
+        } else {
+            throw "Addon file was not created at $destination"
         }
-    } else {
-        Write-Warning "spicetify not found; addon files were registered but apply was skipped."
     }
-} catch {
-    Restore-Backups
-    throw
-} finally {
-    if (Test-Path -LiteralPath $backupDir) {
-        Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    $sources[$fileName] = $cleanUrl
+
+    if ($manifest.subfiles_extension -notcontains $fileName) {
+        $manifest.subfiles_extension += $fileName
     }
-    Restart-SpotifyIfNeeded
+    $registered += $fileName
+}
+
+if ($registered.Count -eq 0) {
+    throw "No addon files could be restored or registered."
+}
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($sourcesPath, (($sources | ConvertTo-Json -Depth 5) + "`r`n"), $utf8NoBom)
+[System.IO.File]::WriteAllText($manifestPath, (($manifest | ConvertTo-Json -Depth 20) + "`r`n"), $utf8NoBom)
+
+Write-Host "Registered addons:"
+foreach ($fileName in $registered) {
+    Write-Host " - $fileName"
+}
+
+if (Get-Command spicetify -ErrorAction SilentlyContinue) {
+    Stop-SpotifyIfRunning
+    try {
+        spicetify apply
+    } finally {
+        Restart-SpotifyIfNeeded
+    }
+} else {
+    Write-Warning "spicetify not found; addon files were registered but apply was skipped."
 }
