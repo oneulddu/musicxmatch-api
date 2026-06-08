@@ -202,12 +202,13 @@ if ($AutoStartMode -eq "scheduled-task") {
 }
 
 Write-Host "[8/8] Verifying health and CORS..." -ForegroundColor Yellow
+$HealthUrl = "$ServerUrl/health"
 $Response = $null
 $LastHealthError = $null
 for ($attempt = 1; $attempt -le 30; $attempt++) {
     try {
-        $Response = Invoke-WebRequest -Uri "$ServerUrl/ready" -UseBasicParsing -TimeoutSec 2
-        if ($Response.StatusCode -eq 200 -and $Response.Headers["Access-Control-Allow-Origin"] -eq "*") {
+        $Response = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 2
+        if ($Response.StatusCode -eq 200) {
             break
         }
     } catch {
@@ -216,10 +217,25 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {
     Start-Sleep -Seconds 1
 }
 if ($null -eq $Response -or $Response.StatusCode -ne 200) {
-    throw "Server health check failed: $ServerUrl/ready $LastHealthError"
+    throw "Server health check failed: $HealthUrl $LastHealthError"
 }
-if ($Response.Headers["Access-Control-Allow-Origin"] -ne "*") {
-    throw "CORS header check failed: Access-Control-Allow-Origin header missing"
+
+$CorsTestOrigin = "spicetify://ivlyrics"
+$CorsResponse = $null
+try {
+    $CorsResponse = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 2 -Headers @{ Origin = $CorsTestOrigin }
+} catch {
+    throw "CORS header check failed: $HealthUrl did not respond to Origin: $CorsTestOrigin $($_.Exception.Message)"
+}
+if ($null -eq $CorsResponse -or $CorsResponse.StatusCode -ne 200) {
+    throw "CORS header check failed: $HealthUrl did not return 200 for Origin: $CorsTestOrigin"
+}
+$CorsAllowOrigin = $CorsResponse.Headers["Access-Control-Allow-Origin"]
+if ($CorsAllowOrigin -is [array]) {
+    $CorsAllowOrigin = $CorsAllowOrigin[0]
+}
+if ($CorsAllowOrigin -ne $CorsTestOrigin) {
+    throw "CORS header check failed: expected Access-Control-Allow-Origin $CorsTestOrigin, got $CorsAllowOrigin"
 }
 
 $InstallCompleted = $true
