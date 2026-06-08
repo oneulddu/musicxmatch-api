@@ -74,7 +74,11 @@ impl GenieClient {
         }
 
         let response = self
-            .send_with_retry(|| self.http.get(SEARCH_URL).query(&[("query", query.as_str())]))
+            .send_with_retry(|| {
+                self.http
+                    .get(SEARCH_URL)
+                    .query(&[("query", query.as_str())])
+            })
             .await?;
 
         if !response.status().is_success() {
@@ -97,10 +101,7 @@ impl GenieClient {
             .send_with_retry(|| {
                 self.http
                     .get(LYRICS_URL)
-                    .query(&[
-                        ("path", "a"),
-                        ("songid", &track.track_id.to_string()),
-                    ])
+                    .query(&[("path", "a"), ("songid", &track.track_id.to_string())])
                     .header(reqwest::header::REFERER, "https://www.genie.co.kr/")
             })
             .await?;
@@ -219,7 +220,9 @@ fn parse_search_tracks(body: &str) -> Vec<GenieTrack> {
 }
 
 fn parse_search_track_row(row: &str) -> Option<GenieTrack> {
-    let track_id = capture_between(row, "songid=\"", "\"")?.parse::<u64>().ok()?;
+    let track_id = capture_between(row, "songid=\"", "\"")?
+        .parse::<u64>()
+        .ok()?;
     let info_block = capture_between(row, "<td class=\"info\">", "</td>")?;
 
     let title = capture_anchor_attr_or_text(info_block, "title ellipsis", "title")
@@ -247,8 +250,8 @@ fn parse_lyrics_payload(body: &str) -> Result<Option<BTreeMap<u64, String>>, Str
     let Some(json) = extract_jsonp_payload(trimmed) else {
         return Err("Genie lyrics payload was not valid JSONP".to_string());
     };
-    let value: Value =
-        serde_json::from_str(json).map_err(|error| format!("Genie lyrics JSON parse failed: {error}"))?;
+    let value: Value = serde_json::from_str(json)
+        .map_err(|error| format!("Genie lyrics JSON parse failed: {error}"))?;
     let Some(object) = value.as_object() else {
         return Err("Genie lyrics payload body was not an object".to_string());
     };
@@ -310,7 +313,11 @@ fn capture_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a 
     Some(&remainder[..end_index])
 }
 
-fn capture_anchor_attr_or_text(haystack: &str, class_name: &str, attr_name: &str) -> Option<String> {
+fn capture_anchor_attr_or_text(
+    haystack: &str,
+    class_name: &str,
+    attr_name: &str,
+) -> Option<String> {
     let marker = format!("class=\"{class_name}\"");
     let class_index = haystack.find(&marker)?;
     let before = &haystack[..class_index];
@@ -343,9 +350,65 @@ fn strip_tags(value: &str) -> String {
     result
 }
 
+fn remove_icon_spans(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut cursor = 0;
+    let lower = value.to_ascii_lowercase();
+
+    while let Some(relative_start) = lower[cursor..].find("<span") {
+        let start = cursor + relative_start;
+        let Some(relative_tag_end) = lower[start..].find('>') else {
+            break;
+        };
+        let tag_end = start + relative_tag_end + 1;
+        let opening_tag = &lower[start..tag_end];
+
+        if !span_has_icon_class(opening_tag) {
+            result.push_str(&value[cursor..tag_end]);
+            cursor = tag_end;
+            continue;
+        }
+
+        let Some(relative_end) = lower[tag_end..].find("</span>") else {
+            break;
+        };
+        let end = tag_end + relative_end + "</span>".len();
+        result.push_str(&value[cursor..start]);
+        cursor = end;
+    }
+
+    result.push_str(&value[cursor..]);
+    result
+}
+
+fn span_has_icon_class(opening_tag: &str) -> bool {
+    let Some(class_index) = opening_tag.find("class") else {
+        return false;
+    };
+    let after_name = opening_tag[class_index + "class".len()..].trim_start();
+    if !after_name.starts_with('=') {
+        return false;
+    }
+
+    let after_equal = after_name[1..].trim_start();
+    let Some(quote) = after_equal.chars().next() else {
+        return false;
+    };
+    if quote != '"' && quote != '\'' {
+        return false;
+    }
+
+    let class_value_start = quote.len_utf8();
+    let Some(class_value_end) = after_equal[class_value_start..].find(quote) else {
+        return false;
+    };
+    after_equal[class_value_start..class_value_start + class_value_end]
+        .split_whitespace()
+        .any(|class_name| class_name == "icon" || class_name.starts_with("icon-"))
+}
+
 fn cleanup_text(value: &str) -> String {
     value
-        .replace("TITLE", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -354,7 +417,7 @@ fn cleanup_text(value: &str) -> String {
 }
 
 fn cleanup_display_text(value: &str) -> String {
-    html_entity_decode(&cleanup_text(&strip_tags(value)))
+    html_entity_decode(&cleanup_text(&strip_tags(&remove_icon_spans(value))))
 }
 
 fn parse_duration_ms(value: &str) -> Option<u64> {
@@ -451,6 +514,21 @@ mod tests {
         assert_eq!(tracks[0].track_id, 101374441);
         assert_eq!(tracks[0].track_name, "How We Came (Feat. pH-1)");
         assert_eq!(tracks[0].artist_name, "Lil Moshpit & Fleeky Bang");
+    }
+
+    #[test]
+    fn parse_search_tracks_preserves_title_word_in_track_name() {
+        let body = r##"
+        <tr class="list" songid="101374442">
+            <td class="info">
+                <a href="#" class="title ellipsis"><span class="icon icon-title">TITLE</span>Title Track (Subtitle)</a>
+                <a href="#" class="artist ellipsis">Artist</a>
+            </td>
+        </tr>
+        "##;
+        let tracks = parse_search_tracks(body);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].track_name, "Title Track (Subtitle)");
     }
 
     #[test]

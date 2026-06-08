@@ -108,15 +108,16 @@
 
 ### 3.3 CORS는 현재 방식 유지
 **현재 상태**
-- `allow_origin(Any)` 사용 중
+- 반영 완료: `allow_origin(AllowOrigin::predicate(...))`로 신뢰 origin만 허용합니다.
+- `IVLYRICS_ALLOWED_ORIGINS`에 명시된 origin, loopback HTTP(S), Spotify 관련 host, 그리고 Spicetify/Tauri 계열 앱 스킴을 허용합니다.
 
 **판단**
-- Spotify 웹뷰 origin이 고정적이지 않아, 섣부른 제한은 실제 동작을 깨뜨릴 가능성이 큽니다.
-- 현재는 실용성이 더 중요합니다.
+- Spotify/Spicetify 실행 환경을 깨뜨리지 않는 선에서 화이트리스트 predicate를 사용하고 있습니다.
+- admin 엔드포인트는 별도로 loopback client만 허용하고, Origin 헤더가 있으면 같은 신뢰 origin 검사를 적용합니다.
 
 **제안**
-- 보수적으로 유지
-- 제한은 실제 허용 origin 목록을 충분히 수집한 뒤 검토
+- 현재 방식 유지
+- 새 클라이언트 origin이 필요해지면 `IVLYRICS_ALLOWED_ORIGINS`로 명시 추가
 
 **우선순위**
 - 낮음
@@ -178,16 +179,19 @@
 - 새 의존성 추가는 명확한 실익이 있을 때만
 
 ### 5.2 release profile 최적화 검토
-**제안**
-- 바이너리 크기와 설치 시간을 줄이기 위해 release profile 최적화 검토
+**현재 상태**
+- 반영 완료: 안전한 release profile 최적화를 추가했습니다.
 
-예:
+현재 설정:
 ```toml
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 ```
+
+**메모**
+- `panic = "abort"`는 패닉 처리 방식 변화가 있어 이번 설정에서는 제외했습니다.
 
 **우선순위**
 - 낮음

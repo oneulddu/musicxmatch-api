@@ -369,8 +369,14 @@ mod tests {
         assert_eq!(payload.list.len(), 2);
         assert_eq!(payload.list[0].track_id, 6196642);
         assert_eq!(payload.list[0].track_title, "How We Came (Feat. pH-1)");
-        assert_eq!(join_artist_names(&payload.list[0].artists), "Lil Moshpit, Fleeky Bang");
-        assert_eq!(parse_duration_ms(payload.list[0].len.as_deref()), Some(177000));
+        assert_eq!(
+            join_artist_names(&payload.list[0].artists),
+            "Lil Moshpit, Fleeky Bang"
+        );
+        assert_eq!(
+            parse_duration_ms(payload.list[0].len.as_deref()),
+            Some(177000)
+        );
     }
 
     #[test]
