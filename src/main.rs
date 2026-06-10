@@ -2586,12 +2586,12 @@ fn is_negative_cacheable_error(error: &LyricsError) -> bool {
 }
 
 fn can_store_negative_cache_for_query(
-    backend: BackendMode,
+    _backend: BackendMode,
     _title: &str,
     _artist: &str,
     spotify_id: &str,
 ) -> bool {
-    spotify_id.is_empty() || matches!(backend, BackendMode::Musicxmatch)
+    spotify_id.is_empty()
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
@@ -3139,7 +3139,7 @@ mod tests {
             "",
             "spotify123",
         ));
-        assert!(can_store_negative_cache_for_query(
+        assert!(!can_store_negative_cache_for_query(
             BackendMode::Musicxmatch,
             "",
             "",
