@@ -32,10 +32,9 @@ use logging::{
     provider_log_tag, translate_log_detail, Logger,
 };
 use matching::{
-    artist_variants, can_use_title_only_fallback, exact_title_artist_match,
-    is_acceptable_bugs_match, is_acceptable_deezer_match, is_acceptable_genie_match,
-    is_acceptable_match, normalize, score_bugs_track, score_deezer_track, score_genie_track,
-    score_track, strip_lyrics_footer, title_variants,
+    artist_variants, can_use_title_only_fallback, exact_title_artist_match, is_acceptable_match,
+    is_acceptable_provider_match, normalize, score_provider_track, score_track,
+    strip_lyrics_footer, title_variants, SearchableTrack,
 };
 use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
 use reqwest::Url;
@@ -2203,22 +2202,52 @@ struct TrackResolution {
     search_variants: Vec<String>,
 }
 
-struct DeezerTrackResolution {
-    tracks: Vec<DeezerTrack>,
+struct ProviderTrackResolution<T> {
+    tracks: Vec<T>,
     matched_by: &'static str,
     search_variants: Vec<String>,
 }
 
-struct BugsTrackResolution {
-    tracks: Vec<BugsTrack>,
-    matched_by: &'static str,
-    search_variants: Vec<String>,
+type DeezerTrackResolution = ProviderTrackResolution<DeezerTrack>;
+type BugsTrackResolution = ProviderTrackResolution<BugsTrack>;
+type GenieTrackResolution = ProviderTrackResolution<GenieTrack>;
+
+trait ProviderTrackSearch<T, E> {
+    async fn search_provider_tracks(
+        &self,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> Result<Vec<T>, E>;
 }
 
-struct GenieTrackResolution {
-    tracks: Vec<GenieTrack>,
-    matched_by: &'static str,
-    search_variants: Vec<String>,
+impl ProviderTrackSearch<DeezerTrack, DeezerError> for DeezerClient {
+    async fn search_provider_tracks(
+        &self,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> Result<Vec<DeezerTrack>, DeezerError> {
+        self.search_tracks(title, artist).await
+    }
+}
+
+impl ProviderTrackSearch<BugsTrack, BugsError> for BugsClient {
+    async fn search_provider_tracks(
+        &self,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> Result<Vec<BugsTrack>, BugsError> {
+        self.search_tracks(title, artist).await
+    }
+}
+
+impl ProviderTrackSearch<GenieTrack, GenieError> for GenieClient {
+    async fn search_provider_tracks(
+        &self,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> Result<Vec<GenieTrack>, GenieError> {
+        self.search_tracks(title, artist).await
+    }
 }
 
 async fn resolve_track(
@@ -2318,61 +2347,10 @@ async fn resolve_deezer_tracks(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> Result<DeezerTrackResolution, DeezerError> {
-    let mut tracks_by_id = HashMap::new();
-    let title_variants = title_variants(title);
-    let artist_variants = artist_variants(artist);
-    let mut attempted_variants = Vec::new();
-    let mut matched_by = "search:title+artist";
-
-    'title_artist_search: for title_variant in &title_variants {
-        for artist_variant in &artist_variants {
-            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
-            let tracks = deezer
-                .search_tracks(Some(title_variant), Some(artist_variant))
-                .await?;
-            for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
-            }
-            if has_exact_candidate(&tracks_by_id, title, artist, |track: &DeezerTrack| {
-                (&track.track_name, &track.artist_name)
-            }) {
-                break 'title_artist_search;
-            }
-        }
-    }
-
-    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
-        matched_by = "search:title";
-        for title_variant in &title_variants {
-            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
-            let tracks = deezer.search_tracks(Some(title_variant), None).await?;
-            for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
-            }
-        }
-    }
-
-    if tracks_by_id.is_empty() {
-        return Err(DeezerError::NotFound);
-    }
-
-    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        score_deezer_track(right, title, artist, duration_secs)
-            .partial_cmp(&score_deezer_track(left, title, artist, duration_secs))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    candidates.retain(|track| is_acceptable_deezer_match(track, title, artist, matched_by));
-
-    if candidates.is_empty() {
-        return Err(DeezerError::NotFound);
-    }
-
-    Ok(DeezerTrackResolution {
-        tracks: candidates,
-        matched_by,
-        search_variants: attempted_variants,
+    resolve_provider_tracks(deezer, title, artist, duration_secs, false, || {
+        DeezerError::NotFound
     })
+    .await
 }
 
 async fn resolve_bugs_tracks(
@@ -2381,62 +2359,10 @@ async fn resolve_bugs_tracks(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> Result<BugsTrackResolution, BugsError> {
-    let mut tracks_by_id = HashMap::new();
-    let title_variants = title_variants(title);
-    let artist_variants = artist_variants(artist);
-    let mut attempted_variants = Vec::new();
-    let mut matched_by = "search:title+artist";
-
-    'title_artist_search: for title_variant in &title_variants {
-        for artist_variant in &artist_variants {
-            attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
-            let tracks = bugs
-                .search_tracks(Some(title_variant), Some(artist_variant))
-                .await?;
-            for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
-            }
-            if has_exact_candidate(&tracks_by_id, title, artist, |track: &BugsTrack| {
-                (&track.track_name, &track.artist_name)
-            }) {
-                break 'title_artist_search;
-            }
-        }
-    }
-
-    if tracks_by_id.is_empty() && can_use_title_only_fallback(title) {
-        matched_by = "search:title";
-        for title_variant in &title_variants {
-            attempted_variants.push(format!("title={title_variant} | artist=<none>"));
-            let tracks = bugs.search_tracks(Some(title_variant), None).await?;
-            for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
-            }
-        }
-    }
-
-    if tracks_by_id.is_empty() {
-        return Err(BugsError::NotFound);
-    }
-
-    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        score_bugs_track(right, title, artist, duration_secs)
-            .partial_cmp(&score_bugs_track(left, title, artist, duration_secs))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    candidates
-        .retain(|track| is_acceptable_bugs_match(track, title, artist, matched_by, duration_secs));
-
-    if candidates.is_empty() {
-        return Err(BugsError::NotFound);
-    }
-
-    Ok(BugsTrackResolution {
-        tracks: candidates,
-        matched_by,
-        search_variants: attempted_variants,
+    resolve_provider_tracks(bugs, title, artist, duration_secs, true, || {
+        BugsError::NotFound
     })
+    .await
 }
 
 async fn resolve_genie_tracks(
@@ -2445,6 +2371,25 @@ async fn resolve_genie_tracks(
     artist: &str,
     duration_secs: Option<f32>,
 ) -> Result<GenieTrackResolution, GenieError> {
+    resolve_provider_tracks(genie, title, artist, duration_secs, true, || {
+        GenieError::NotFound
+    })
+    .await
+}
+
+async fn resolve_provider_tracks<C, T, E, F>(
+    client: &C,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+    use_duration_for_acceptance: bool,
+    not_found_error: F,
+) -> Result<ProviderTrackResolution<T>, E>
+where
+    C: ProviderTrackSearch<T, E>,
+    T: SearchableTrack,
+    F: Fn() -> E,
+{
     let mut tracks_by_id = HashMap::new();
     let title_variants = title_variants(title);
     let artist_variants = artist_variants(artist);
@@ -2454,15 +2399,16 @@ async fn resolve_genie_tracks(
     'title_artist_search: for title_variant in &title_variants {
         for artist_variant in &artist_variants {
             attempted_variants.push(format!("title={title_variant} | artist={artist_variant}"));
-            let tracks = genie
-                .search_tracks(Some(title_variant), Some(artist_variant))
+            let tracks = client
+                .search_provider_tracks(Some(title_variant), Some(artist_variant))
                 .await?;
             for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
+                tracks_by_id.entry(track.id()).or_insert(track);
             }
-            if has_exact_candidate(&tracks_by_id, title, artist, |track: &GenieTrack| {
-                (&track.track_name, &track.artist_name)
-            }) {
+            if tracks_by_id
+                .values()
+                .any(|track| exact_title_artist_match(track.name(), track.artist(), title, artist))
+            {
                 break 'title_artist_search;
             }
         }
@@ -2472,31 +2418,48 @@ async fn resolve_genie_tracks(
         matched_by = "search:title";
         for title_variant in &title_variants {
             attempted_variants.push(format!("title={title_variant} | artist=<none>"));
-            let tracks = genie.search_tracks(Some(title_variant), None).await?;
+            let tracks = client
+                .search_provider_tracks(Some(title_variant), None)
+                .await?;
             for track in tracks {
-                tracks_by_id.entry(track.track_id).or_insert(track);
+                tracks_by_id.entry(track.id()).or_insert(track);
             }
         }
     }
 
     if tracks_by_id.is_empty() {
-        return Err(GenieError::NotFound);
+        return Err(not_found_error());
     }
 
     let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        score_genie_track(right, title, artist, duration_secs)
-            .partial_cmp(&score_genie_track(left, title, artist, duration_secs))
+        score_provider_track(right, title, artist, duration_secs)
+            .partial_cmp(&score_provider_track(left, title, artist, duration_secs))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates
-        .retain(|track| is_acceptable_genie_match(track, title, artist, matched_by, duration_secs));
+    candidates.retain(|track| {
+        let actual_duration_secs = use_duration_for_acceptance
+            .then(|| {
+                track
+                    .duration_ms()
+                    .map(|actual_ms| actual_ms as f32 / 1000.0)
+            })
+            .flatten();
+        is_acceptable_provider_match(
+            track.name(),
+            track.artist(),
+            title,
+            artist,
+            matched_by,
+            duration_secs.zip(actual_duration_secs),
+        )
+    });
 
     if candidates.is_empty() {
-        return Err(GenieError::NotFound);
+        return Err(not_found_error());
     }
 
-    Ok(GenieTrackResolution {
+    Ok(ProviderTrackResolution {
         tracks: candidates,
         matched_by,
         search_variants: attempted_variants,
