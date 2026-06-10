@@ -9,7 +9,7 @@ Rust로 작성된 단일 바이너리 서버가 MusicXMatch · Deezer · Bugs ·
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.7.20-green.svg)](https://github.com/oneulddu/musicxmatch-api)
+[![Version](https://img.shields.io/badge/version-0.7.21-green.svg)](https://github.com/oneulddu/musicxmatch-api)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#-빠른-시작)
 
 [빠른 시작](#-빠른-시작) • [Provider 설정](#️-provider-설정) • [API](#-api-엔드포인트) • [고급 설정](#-고급-설정) • [문제 해결](#-문제-해결)
@@ -196,16 +196,22 @@ scripts\patch-ivlyrics-selection.ps1 -NoApply
 | `PORT` | `8092` | 서버 포트 |
 | `IVLYRICS_BIND_HOST` | `127.0.0.1` | 바인딩 호스트 |
 | `IVLYRICS_ALLOWED_ORIGINS` | `spicetify://ivlyrics,https://xpui.app.spotify.com` | CORS 허용 origin |
-| `IVLYRICS_HTTP_TIMEOUT_SECS` | `10` | provider HTTP 타임아웃(초) |
+| `IVLYRICS_HTTP_TIMEOUT_SECS` | `10` | 모든 provider 공통 HTTP 타임아웃(초) |
+| `IVLYRICS_MUSIXMATCH_TIMEOUT_SECS` | `10` | MusicXMatch HTTP 타임아웃(초) |
+| `IVLYRICS_DEEZER_TIMEOUT_SECS` | `10` | Deezer HTTP 타임아웃(초) |
+| `IVLYRICS_BUGS_TIMEOUT_SECS` | `10` | Bugs HTTP 타임아웃(초) |
+| `IVLYRICS_GENIE_TIMEOUT_SECS` | `10` | Genie HTTP 타임아웃(초) |
 | `IVLYRICS_UPDATE_TIMEOUT_SECS` | `5` | 업데이트 확인 타임아웃(초) |
 | `DEEZER_ARL` | – | Deezer ARL 쿠키 |
 | `IVLYRICS_MXM_LOG` | `~/.ivlyrics-musicxmatch/server.log` | 서버 로그 경로 |
+| `IVLYRICS_MXM_UPDATE_LOG` | `~/.ivlyrics-musicxmatch/update.log` | 업데이트 로그 경로 |
 | `IVLYRICS_MXM_CONFIG` | `~/.ivlyrics-musicxmatch/config.json` | 설정 파일 경로 |
 | `MXM_SESSION_FILE` | – | MusicXMatch 세션 캐시 경로 |
 
-`.env.example`을 복사해 시작할 수 있습니다:
+`.env.example`은 서버가 자동으로 읽지 않습니다. 필요한 값을 shell, launchd, systemd, Docker 등 실행 환경의 환경 변수로 설정하세요:
 ```bash
-cp .env.example .env
+export IVLYRICS_BUGS_TIMEOUT_SECS=12
+export IVLYRICS_MXM_UPDATE_LOG="$HOME/.ivlyrics-musicxmatch/update.log"
 ```
 
 ### 애드온 수동 설치 / 재등록
@@ -357,7 +363,7 @@ curl http://127.0.0.1:8092/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.20",
+  "version": "0.7.21",
   "provider": "musicxmatch",
   "backend": "musixmatch + deezer(optional) + bugs + genie",
   "cors": true,
@@ -426,7 +432,7 @@ cargo test
 node scripts/generate_addons.js
 
 # 버전 일괄 업데이트
-./scripts/bump_version.sh 0.7.20
+./scripts/bump_version.sh 0.7.21
 ```
 
 ### 로그 확인
