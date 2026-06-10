@@ -206,6 +206,10 @@ enum LyricsError {
     Deezer(DeezerError),
     Bugs(BugsError),
     Genie(GenieError),
+    Auto {
+        selected: Box<LyricsError>,
+        negative_cacheable: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1912,12 +1916,20 @@ async fn fetch_payload(
                 return Ok(payload);
             }
 
-            Err(select_auto_error(
-                mxm_error.expect("fallbacks without candidates require a MusicXMatch error"),
-                deezer_error,
-                bugs_error,
-                genie_error,
-            ))
+            let mxm_error =
+                mxm_error.expect("fallbacks without candidates require a MusicXMatch error");
+            let negative_cacheable = is_auto_negative_cacheable(
+                &mxm_error,
+                deezer_error.as_ref(),
+                bugs_error.as_ref(),
+                genie_error.as_ref(),
+            );
+            let selected = select_auto_error(mxm_error, deezer_error, bugs_error, genie_error);
+
+            Err(LyricsError::Auto {
+                selected: Box::new(selected),
+                negative_cacheable,
+            })
         }
     }
 }
@@ -2526,18 +2538,55 @@ where
     })
 }
 
+fn is_auto_negative_cacheable(
+    mxm_error: &MxmError,
+    deezer_error: Option<&DeezerError>,
+    bugs_error: Option<&BugsError>,
+    genie_error: Option<&GenieError>,
+) -> bool {
+    is_negative_cacheable_mxm_error(mxm_error)
+        && deezer_error
+            .map(is_negative_cacheable_deezer_error)
+            .unwrap_or(true)
+        && bugs_error
+            .map(is_negative_cacheable_bugs_error)
+            .unwrap_or(false)
+        && genie_error
+            .map(is_negative_cacheable_genie_error)
+            .unwrap_or(false)
+}
+
+fn is_negative_cacheable_mxm_error(error: &MxmError) -> bool {
+    matches!(error, MxmError::NotFound | MxmError::NotAvailable)
+}
+
+fn is_negative_cacheable_deezer_error(error: &DeezerError) -> bool {
+    matches!(error, DeezerError::NotFound | DeezerError::NotAvailable)
+}
+
+fn is_negative_cacheable_bugs_error(error: &BugsError) -> bool {
+    matches!(error, BugsError::NotFound | BugsError::NotAvailable)
+}
+
+fn is_negative_cacheable_genie_error(error: &GenieError) -> bool {
+    matches!(error, GenieError::NotFound | GenieError::NotAvailable)
+}
+
 fn is_negative_cacheable_error(error: &LyricsError) -> bool {
-    matches!(
-        error,
-        LyricsError::Bugs(BugsError::NotFound | BugsError::NotAvailable)
-            | LyricsError::Genie(GenieError::NotFound | GenieError::NotAvailable)
-            | LyricsError::Deezer(DeezerError::NotFound | DeezerError::NotAvailable)
-            | LyricsError::Musixmatch(MxmError::NotFound | MxmError::NotAvailable)
-    )
+    match error {
+        LyricsError::Bugs(error) => is_negative_cacheable_bugs_error(error),
+        LyricsError::Genie(error) => is_negative_cacheable_genie_error(error),
+        LyricsError::Deezer(error) => is_negative_cacheable_deezer_error(error),
+        LyricsError::Musixmatch(error) => is_negative_cacheable_mxm_error(error),
+        LyricsError::Auto {
+            negative_cacheable, ..
+        } => *negative_cacheable,
+    }
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
+        LyricsError::Auto { selected, .. } => map_error(*selected),
         LyricsError::Bugs(BugsError::NotFound) => no_tracks_found(),
         LyricsError::Bugs(BugsError::NotAvailable) => no_lyrics_available(),
         LyricsError::Bugs(BugsError::Ratelimit) => rate_limit("Bugs"),
@@ -3024,5 +3073,27 @@ mod tests {
 
         assert!(cached_lyrics(&state, &cache_key).await.is_none());
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn auto_negative_cache_requires_all_attempted_errors_to_be_misses() {
+        assert!(is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::Ratelimit),
+            Some(&GenieError::NotAvailable),
+        ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::Ratelimit,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
     }
 }
