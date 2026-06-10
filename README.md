@@ -9,7 +9,7 @@ Rust로 작성된 단일 바이너리 서버가 MusicXMatch · Deezer · Bugs ·
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.7.19-green.svg)](https://github.com/oneulddu/musicxmatch-api)
+[![Version](https://img.shields.io/badge/version-0.7.20-green.svg)](https://github.com/oneulddu/musicxmatch-api)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#-빠른-시작)
 
 [빠른 시작](#-빠른-시작) • [Provider 설정](#️-provider-설정) • [API](#-api-엔드포인트) • [고급 설정](#-고급-설정) • [문제 해결](#-문제-해결)
@@ -357,7 +357,7 @@ curl http://127.0.0.1:8092/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.19",
+  "version": "0.7.20",
   "provider": "musicxmatch",
   "backend": "musixmatch + deezer(optional) + bugs + genie",
   "cors": true,
@@ -426,7 +426,7 @@ cargo test
 node scripts/generate_addons.js
 
 # 버전 일괄 업데이트
-./scripts/bump_version.sh 0.7.19
+./scripts/bump_version.sh 0.7.20
 ```
 
 ### 로그 확인
