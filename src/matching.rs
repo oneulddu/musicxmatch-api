@@ -110,40 +110,69 @@ pub fn score_track(track: &Track, title: &str, artist: &str, duration_secs: Opti
     score
 }
 
-pub fn score_deezer_track(
-    track: &DeezerTrack,
-    title: &str,
-    artist: &str,
-    duration_secs: Option<f32>,
-) -> f32 {
-    score_basic_match(
-        title,
-        artist,
-        &track.track_name,
-        &track.artist_name,
-        duration_secs,
-        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
-    )
+pub trait SearchableTrack {
+    fn id(&self) -> u64;
+    fn name(&self) -> &str;
+    fn artist(&self) -> &str;
+    fn duration_ms(&self) -> Option<u64>;
 }
 
-pub fn score_bugs_track(
-    track: &BugsTrack,
-    title: &str,
-    artist: &str,
-    duration_secs: Option<f32>,
-) -> f32 {
-    score_basic_match(
-        title,
-        artist,
-        &track.track_name,
-        &track.artist_name,
-        duration_secs,
-        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
-    )
+impl SearchableTrack for DeezerTrack {
+    fn id(&self) -> u64 {
+        self.track_id
+    }
+
+    fn name(&self) -> &str {
+        &self.track_name
+    }
+
+    fn artist(&self) -> &str {
+        &self.artist_name
+    }
+
+    fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
+    }
 }
 
-pub fn score_genie_track(
-    track: &GenieTrack,
+impl SearchableTrack for BugsTrack {
+    fn id(&self) -> u64 {
+        self.track_id
+    }
+
+    fn name(&self) -> &str {
+        &self.track_name
+    }
+
+    fn artist(&self) -> &str {
+        &self.artist_name
+    }
+
+    fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
+    }
+}
+
+impl SearchableTrack for GenieTrack {
+    fn id(&self) -> u64 {
+        self.track_id
+    }
+
+    fn name(&self) -> &str {
+        &self.track_name
+    }
+
+    fn artist(&self) -> &str {
+        &self.artist_name
+    }
+
+    fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
+    }
+}
+
+pub fn score_provider_track<T: SearchableTrack>(
+    track: &T,
     title: &str,
     artist: &str,
     duration_secs: Option<f32>,
@@ -151,10 +180,12 @@ pub fn score_genie_track(
     score_basic_match(
         title,
         artist,
-        &track.track_name,
-        &track.artist_name,
+        track.name(),
+        track.artist(),
         duration_secs,
-        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
+        track
+            .duration_ms()
+            .map(|actual_ms| actual_ms as f32 / 1000.0),
     )
 }
 
@@ -265,16 +296,18 @@ pub fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by:
     }
 }
 
-pub fn is_acceptable_deezer_match(
-    track: &DeezerTrack,
+pub fn is_acceptable_provider_match(
+    track_name: &str,
+    artist_name: &str,
     title: &str,
     artist: &str,
     matched_by: &str,
+    duration_pair: Option<(f32, f32)>,
 ) -> bool {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
+    let track_title = simplify(track_name);
+    let track_artist = normalize(artist_name);
 
     let title_similarity = similarity(&want_title, &track_title);
     let artist_similarity = if want_artist.is_empty() {
@@ -284,81 +317,9 @@ pub fn is_acceptable_deezer_match(
     };
     let artist_contains = !want_artist.is_empty()
         && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-
-    match matched_by {
-        "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains)
-        }
-        _ => title_similarity >= 0.45 || artist_similarity >= 0.45,
-    }
-}
-
-pub fn is_acceptable_bugs_match(
-    track: &BugsTrack,
-    title: &str,
-    artist: &str,
-    matched_by: &str,
-    duration_secs: Option<f32>,
-) -> bool {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let title_similarity = similarity(&want_title, &track_title);
-    let artist_similarity = if want_artist.is_empty() {
-        1.0
-    } else {
-        similarity(&want_artist, &track_artist)
-    };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-    let exact_duration = exact_duration_match(
-        duration_secs,
-        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
-    );
-
-    match matched_by {
-        "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty()
-                    || artist_similarity >= 0.35
-                    || artist_contains
-                    || exact_duration)
-        }
-        _ => {
-            title_similarity >= 0.45
-                || artist_similarity >= 0.45
-                || (title_similarity >= 0.8 && exact_duration)
-        }
-    }
-}
-
-pub fn is_acceptable_genie_match(
-    track: &GenieTrack,
-    title: &str,
-    artist: &str,
-    matched_by: &str,
-    duration_secs: Option<f32>,
-) -> bool {
-    let want_title = simplify(title);
-    let want_artist = normalize(artist);
-    let track_title = simplify(&track.track_name);
-    let track_artist = normalize(&track.artist_name);
-
-    let title_similarity = similarity(&want_title, &track_title);
-    let artist_similarity = if want_artist.is_empty() {
-        1.0
-    } else {
-        similarity(&want_artist, &track_artist)
-    };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
-    let exact_duration = exact_duration_match(
-        duration_secs,
-        track.duration_ms.map(|actual_ms| actual_ms as f32 / 1000.0),
-    );
+    let exact_duration = duration_pair
+        .map(|(want, actual)| exact_duration_match(Some(want), Some(actual)))
+        .unwrap_or(false);
 
     match matched_by {
         "search:title" => {
