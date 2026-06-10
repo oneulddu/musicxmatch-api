@@ -14,8 +14,13 @@ const LOG_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
 
 #[derive(Clone)]
 pub struct Logger {
-    file: Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    state: Arc<std::sync::Mutex<LoggerState>>,
     path: PathBuf,
+}
+
+struct LoggerState {
+    file: Option<File>,
+    bytes_written: u64,
 }
 
 impl Logger {
@@ -25,9 +30,9 @@ impl Logger {
         }
         rotate_log_if_needed(&path);
 
-        let file = open_log_file(&path);
+        let state = open_log_state(&path);
         Self {
-            file: Arc::new(std::sync::Mutex::new(file)),
+            state: Arc::new(std::sync::Mutex::new(state)),
             path,
         }
     }
@@ -39,13 +44,18 @@ impl Logger {
     fn write_line(&self, message: &str) {
         let line = format!("[{}] {message}\n", timestamp_string());
         print!("{line}");
-        if let Ok(mut guard) = self.file.lock() {
-            reopen_if_log_too_large(&self.path, &mut guard);
-            if let Some(file) = guard.as_mut() {
+        if let Ok(mut state) = self.state.lock() {
+            if state.file.is_none() {
+                *state = open_log_state(&self.path);
+            }
+            if let Some(file) = state.file.as_mut() {
                 let _ = file.write_all(line.as_bytes());
                 let _ = file.flush();
+                state.bytes_written = state
+                    .bytes_written
+                    .saturating_add(line.len().try_into().unwrap_or(u64::MAX));
             }
-            reopen_if_log_too_large(&self.path, &mut guard);
+            rotate_log_if_counter_too_large(&self.path, &mut state);
         }
     }
 }
@@ -138,27 +148,23 @@ fn open_log_file(path: &Path) -> Option<File> {
     OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
-fn reopen_if_log_too_large(path: &Path, file: &mut Option<File>) {
-    let is_too_large = file
-        .as_ref()
-        .and_then(|value| value.metadata().ok())
-        .map(|metadata| metadata.len() > LOG_MAX_BYTES)
-        .unwrap_or_else(|| {
-            metadata(path)
-                .map(|metadata| metadata.len() > LOG_MAX_BYTES)
-                .unwrap_or(false)
-        });
+fn open_log_state(path: &Path) -> LoggerState {
+    let file = open_log_file(path);
+    let bytes_written = metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    LoggerState {
+        file,
+        bytes_written,
+    }
+}
 
-    if !is_too_large {
-        if file.is_none() {
-            *file = open_log_file(path);
-        }
+fn rotate_log_if_counter_too_large(path: &Path, state: &mut LoggerState) {
+    if state.bytes_written <= LOG_MAX_BYTES {
         return;
     }
 
-    *file = None;
+    state.file = None;
     rotate_log_if_needed(path);
-    *file = open_log_file(path);
+    *state = open_log_state(path);
 }
 
 fn rotate_log_if_needed(path: &Path) {
@@ -169,12 +175,52 @@ fn rotate_log_if_needed(path: &Path) {
         return;
     }
 
-    let rotated = path.with_extension(match path.extension().and_then(|value| value.to_str()) {
-        Some(extension) if !extension.is_empty() => format!("{extension}.1"),
-        _ => "1".to_string(),
-    });
+    let rotated = rotated_log_path(path);
     let _ = remove_file(&rotated);
     if rename(path, &rotated).is_err() {
         let _ = OpenOptions::new().write(true).truncate(true).open(path);
+    }
+}
+
+fn rotated_log_path(path: &Path) -> PathBuf {
+    path.with_extension(match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) if !extension.is_empty() => format!("{extension}.1"),
+        _ => "1".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_log_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ivlyrics-musicxmatch-{name}-{}.log",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    #[test]
+    fn logger_rotates_after_byte_counter_exceeds_limit() {
+        let path = test_log_path("rotate");
+        let rotated = rotated_log_path(&path);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
+
+        let logger = Logger::new(path.clone());
+        logger.log_tagged("Test", &"x".repeat(LOG_MAX_BYTES as usize + 1));
+        logger.log_tagged("Test", "after rotate");
+
+        let rotated_metadata = fs::metadata(&rotated).expect("rotated log should exist");
+        assert!(rotated_metadata.len() > LOG_MAX_BYTES);
+        let current = fs::read_to_string(&path).expect("current log should be readable");
+        assert!(current.contains("after rotate"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
     }
 }
