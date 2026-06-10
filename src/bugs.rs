@@ -1,14 +1,14 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::provider_util::{
+    format_lrc_timestamp_ms, parse_duration_ms, send_with_retry, TimestampRounding,
+};
 use serde::Deserialize;
-use tokio::time::sleep;
 
 const SEARCH_URL: &str = "https://m.bugs.co.kr/api/getSearchList";
 const SYNCED_LYRICS_URL: &str = "https://music.bugs.co.kr/player/lyrics/T";
 const PLAIN_LYRICS_URL: &str = "https://music.bugs.co.kr/player/lyrics/N";
-const RETRY_ATTEMPTS: usize = 2;
-const RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Clone)]
 pub struct BugsClient {
@@ -73,16 +73,18 @@ impl BugsClient {
             return Ok(Vec::new());
         }
 
-        let response = self
-            .send_with_retry(|| {
+        let response = send_with_retry(
+            || {
                 self.http.get(SEARCH_URL).query(&[
                     ("type", "track"),
                     ("query", query.as_str()),
                     ("page", "1"),
                     ("size", "30"),
                 ])
-            })
-            .await?;
+            },
+            BugsError::Provider,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(map_search_status(response.status()));
@@ -100,7 +102,7 @@ impl BugsClient {
                 track_id: track.track_id,
                 track_name: track.track_title,
                 artist_name: join_artist_names(&track.artists),
-                duration_ms: parse_duration_ms(track.len.as_deref()),
+                duration_ms: track.len.as_deref().and_then(parse_duration_ms),
             })
             .collect())
     }
@@ -146,9 +148,11 @@ impl BugsClient {
         } else {
             PLAIN_LYRICS_URL
         };
-        let response = self
-            .send_with_retry(|| self.http.get(format!("{mode_url}/{track_id}")))
-            .await?;
+        let response = send_with_retry(
+            || self.http.get(format!("{mode_url}/{track_id}")),
+            BugsError::Provider,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(map_lyrics_status(response.status()));
@@ -164,42 +168,6 @@ impl BugsClient {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()))
     }
-
-    async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response, BugsError>
-    where
-        F: Fn() -> reqwest::RequestBuilder,
-    {
-        for attempt in 0..RETRY_ATTEMPTS {
-            match build().send().await {
-                Ok(response) => {
-                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_status(response.status()) {
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    return Ok(response);
-                }
-                Err(error) => {
-                    if attempt + 1 < RETRY_ATTEMPTS && is_retryable_error(&error) {
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    return Err(BugsError::Provider(error.to_string()));
-                }
-            }
-        }
-
-        Err(BugsError::Provider(
-            "request retry loop exited unexpectedly".to_string(),
-        ))
-    }
-}
-
-fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-fn is_retryable_error(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_request()
 }
 
 fn map_search_status(status: reqwest::StatusCode) -> BugsError {
@@ -239,29 +207,6 @@ fn join_artist_names(artists: &[BugsArtist]) -> String {
         .join(", ")
 }
 
-fn parse_duration_ms(value: Option<&str>) -> Option<u64> {
-    let value = value?.trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    let parts = value
-        .split(':')
-        .map(|part| part.trim().parse::<u64>().ok())
-        .collect::<Option<Vec<_>>>()?;
-
-    let total_seconds = match parts.as_slice() {
-        [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
-        [hours, minutes, seconds] => hours
-            .saturating_mul(3600)
-            .saturating_add(minutes.saturating_mul(60))
-            .saturating_add(*seconds),
-        _ => return None,
-    };
-
-    Some(total_seconds.saturating_mul(1000))
-}
-
 fn parse_synced_lyrics(value: &str) -> Option<String> {
     let mut lines = Vec::new();
 
@@ -284,7 +229,12 @@ fn parse_synced_lyrics(value: &str) -> Option<String> {
             _ => continue,
         };
 
-        lines.push(format!("{}{}", format_lrc_timestamp(seconds), text));
+        let milliseconds = (seconds * 1000.0).round() as u64;
+        lines.push(format!(
+            "{}{}",
+            format_lrc_timestamp_ms(milliseconds, TimestampRounding::Nearest),
+            text
+        ));
     }
 
     if lines.is_empty() {
@@ -292,14 +242,6 @@ fn parse_synced_lyrics(value: &str) -> Option<String> {
     } else {
         Some(lines.join("\n"))
     }
-}
-
-fn format_lrc_timestamp(seconds: f64) -> String {
-    let total_centis = (seconds.max(0.0) * 100.0).round() as u64;
-    let minutes = total_centis / 6000;
-    let secs = (total_centis / 100) % 60;
-    let centis = total_centis % 100;
-    format!("[{minutes:02}:{secs:02}.{centis:02}]")
 }
 
 fn normalize_plain_lyrics(value: &str) -> String {
@@ -344,9 +286,9 @@ mod tests {
 
     #[test]
     fn parse_duration_supports_mm_ss() {
-        assert_eq!(parse_duration_ms(Some("02:53")), Some(173000));
-        assert_eq!(parse_duration_ms(Some("1:02:03")), Some(3_723_000));
-        assert_eq!(parse_duration_ms(Some("")), None);
+        assert_eq!(parse_duration_ms("02:53"), Some(173000));
+        assert_eq!(parse_duration_ms("1:02:03"), Some(3_723_000));
+        assert_eq!(parse_duration_ms(""), None);
     }
 
     #[test]
@@ -374,7 +316,7 @@ mod tests {
             "Lil Moshpit, Fleeky Bang"
         );
         assert_eq!(
-            parse_duration_ms(payload.list[0].len.as_deref()),
+            payload.list[0].len.as_deref().and_then(parse_duration_ms),
             Some(177000)
         );
     }

@@ -4,6 +4,7 @@ mod genie;
 mod logging;
 mod matching;
 mod musixmatch;
+mod provider_util;
 
 use std::collections::HashMap;
 use std::fs::{create_dir_all, OpenOptions};
