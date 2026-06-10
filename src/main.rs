@@ -1221,14 +1221,18 @@ fn spawn_addon_restore_task(logger: Logger) {
             }
 
             if apply_pending {
-                match apply_spicetify_changes() {
-                    Ok(()) => {
+                match tokio::task::spawn_blocking(apply_spicetify_changes).await {
+                    Ok(Ok(())) => {
                         apply_pending = false;
                         logger.log_tagged("Server", "spicetify apply 자동 실행 완료");
                     }
-                    Err(error) => logger.log_tagged(
+                    Ok(Err(error)) => logger.log_tagged(
                         "Server",
                         &format!("spicetify apply 자동 실행 실패 detail={error}"),
+                    ),
+                    Err(error) => logger.log_tagged(
+                        "Server",
+                        &format!("spicetify apply 작업 실행 실패 detail={error}"),
                     ),
                 }
             }
