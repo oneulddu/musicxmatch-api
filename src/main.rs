@@ -697,7 +697,8 @@ async fn get_lyrics(
             json_response(StatusCode::OK, payload)
         }
         Err(error) => {
-            let cacheable_failure = is_negative_cacheable_error(&error);
+            let cacheable_failure = is_negative_cacheable_error(&error)
+                && can_store_negative_cache_for_query(backend, &title, &artist, &spotify_id);
             let (status, detail) = map_error(error);
             state.logger.log_tagged(
                 request_tag,
@@ -2584,6 +2585,17 @@ fn is_negative_cacheable_error(error: &LyricsError) -> bool {
     }
 }
 
+fn can_store_negative_cache_for_query(
+    backend: BackendMode,
+    title: &str,
+    artist: &str,
+    spotify_id: &str,
+) -> bool {
+    spotify_id.is_empty()
+        || (!title.is_empty() && !artist.is_empty())
+        || matches!(backend, BackendMode::Musicxmatch)
+}
+
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
         LyricsError::Auto { selected, .. } => map_error(*selected),
@@ -3094,6 +3106,46 @@ mod tests {
             Some(&DeezerError::NotAvailable),
             Some(&BugsError::NotFound),
             Some(&GenieError::NotAvailable),
+        ));
+    }
+
+    #[test]
+    fn negative_cache_skips_spotify_only_metadata_dependent_backends() {
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Bugs,
+            "Tell Me",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Genie,
+            "",
+            "CAMO",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Deezer,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Musicxmatch,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "Tell Me",
+            "CAMO",
+            "spotify123",
         ));
     }
 }
