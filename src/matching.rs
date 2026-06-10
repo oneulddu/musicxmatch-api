@@ -418,13 +418,22 @@ fn strip_brackets(value: &str) -> String {
 }
 
 fn strip_featured(value: &str) -> String {
-    let lower = value.to_lowercase();
     for marker in [" feat. ", " feat ", " featuring ", " ft. ", " ft "] {
-        if let Some(index) = lower.find(marker) {
+        if let Some(index) = find_ascii_marker(value, marker) {
             return value[..index].trim().to_string();
         }
     }
     value.trim().to_string()
+}
+
+fn find_ascii_marker(value: &str, marker: &str) -> Option<usize> {
+    value.char_indices().find_map(|(index, _)| {
+        let end = index + marker.len();
+        value
+            .get(index..end)
+            .filter(|candidate| candidate.eq_ignore_ascii_case(marker))
+            .map(|_| index)
+    })
 }
 
 fn first_artist(value: &str) -> String {
@@ -461,4 +470,14 @@ pub fn normalize_connectors(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_featured_handles_multibyte_case_expansion() {
+        assert_eq!(strip_featured("İstanbul feat. Someone"), "İstanbul");
+    }
 }
