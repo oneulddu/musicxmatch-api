@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::provider_util::{format_lrc_timestamp_ms, TimestampRounding};
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE};
 use serde::Deserialize;
 use serde_json::json;
@@ -393,7 +394,7 @@ fn build_lrc_from_sync_lines(lines: &[SyncLine]) -> String {
             }
             Some(format!(
                 "{} {}",
-                format_lrc_timestamp(line.milliseconds),
+                format_lrc_timestamp_ms(line.milliseconds, TimestampRounding::Floor),
                 text
             ))
         })
@@ -415,18 +416,14 @@ fn build_lrc_from_word_lines(lines: &[WordLine]) -> String {
             if text.is_empty() {
                 return None;
             }
-            Some(format!("{} {}", format_lrc_timestamp(line.start), text))
+            Some(format!(
+                "{} {}",
+                format_lrc_timestamp_ms(line.start, TimestampRounding::Floor),
+                text
+            ))
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn format_lrc_timestamp(milliseconds: u64) -> String {
-    let total_seconds = milliseconds / 1000;
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    let hundredths = (milliseconds % 1000) / 10;
-    format!("[{minutes:02}:{seconds:02}.{hundredths:02}]")
 }
 
 #[derive(Debug, Deserialize)]
