@@ -12,7 +12,7 @@ use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::Request;
@@ -875,13 +875,7 @@ fn is_trusted_spotify_host(host: &str) -> bool {
 }
 
 async fn latest_version_info() -> Result<VersionInfo, String> {
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(
-            read_timeout_secs("IVLYRICS_UPDATE_TIMEOUT_SECS")
-                .unwrap_or(DEFAULT_UPDATE_TIMEOUT_SECS),
-        ))
-        .build()
-        .map_err(|error| error.to_string())?
+    let response = update_http_client()?
         .get(VERSION_INFO_URL)
         .send()
         .await
@@ -898,6 +892,22 @@ async fn latest_version_info() -> Result<VersionInfo, String> {
         .json::<VersionInfo>()
         .await
         .map_err(|error| error.to_string())
+}
+
+fn update_http_client() -> Result<&'static reqwest::Client, String> {
+    static UPDATE_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    UPDATE_HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(
+                    read_timeout_secs("IVLYRICS_UPDATE_TIMEOUT_SECS")
+                        .unwrap_or(DEFAULT_UPDATE_TIMEOUT_SECS),
+                ))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn compare_versions(left: &str, right: &str) -> i32 {
@@ -1258,14 +1268,11 @@ fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logg
 
 fn spawn_addon_restore_task(logger: Logger) {
     tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_UPDATE_TIMEOUT_SECS))
-            .build()
-            .ok();
+        let client = update_http_client().ok();
         let mut apply_pending = false;
 
         loop {
-            match restore_known_provider_addons(client.as_ref()).await {
+            match restore_known_provider_addons(client).await {
                 Ok(restored) if !restored.is_empty() => {
                     apply_pending = true;
                     logger.log_tagged(
@@ -2715,6 +2722,13 @@ mod tests {
         assert_eq!(parse_backend_mode(Some("deezer")), BackendMode::Deezer);
         assert_eq!(parse_backend_mode(Some("bugs")), BackendMode::Bugs);
         assert_eq!(parse_backend_mode(Some("genie")), BackendMode::Genie);
+    }
+
+    #[test]
+    fn update_http_client_is_reused() {
+        let first = update_http_client().expect("update client should build");
+        let second = update_http_client().expect("update client should build");
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]
