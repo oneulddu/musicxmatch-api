@@ -395,22 +395,69 @@ fn cleanup_display_text(value: &str) -> String {
 }
 
 fn html_entity_decode(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#34;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&#x27;", "'")
-        .replace("&#x2F;", "/")
-        .replace("&#40;", "(")
-        .replace("&#41;", ")")
-        .replace("&#91;", "[")
-        .replace("&#93;", "]")
-        .replace("&#44;", ",")
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(index) = rest.find('&') {
+        decoded.push_str(&rest[..index]);
+        rest = &rest[index..];
+
+        if let Some((replacement, consumed)) = decode_html_entity_prefix(rest) {
+            decoded.push(replacement);
+            rest = &rest[consumed..];
+            continue;
+        }
+
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
+        decoded.push(character);
+        rest = &rest[character.len_utf8()..];
+    }
+
+    decoded.push_str(rest);
+    decoded
 }
+
+fn decode_html_entity_prefix(value: &str) -> Option<(char, usize)> {
+    let amp_prefix_len = "&amp;".len();
+    if value.starts_with("&amp;") {
+        for (entity, replacement) in HTML_ENTITIES {
+            let Some(encoded_suffix) = entity.strip_prefix('&') else {
+                continue;
+            };
+
+            if entity != "&amp;" && value[amp_prefix_len..].starts_with(encoded_suffix) {
+                return Some((replacement, amp_prefix_len + encoded_suffix.len()));
+            }
+        }
+    }
+
+    for (entity, replacement) in HTML_ENTITIES {
+        if value.starts_with(entity) {
+            return Some((replacement, entity.len()));
+        }
+    }
+
+    None
+}
+
+const HTML_ENTITIES: [(&str, char); 14] = [
+    ("&amp;", '&'),
+    ("&quot;", '"'),
+    ("&#34;", '"'),
+    ("&#39;", '\''),
+    ("&apos;", '\''),
+    ("&lt;", '<'),
+    ("&gt;", '>'),
+    ("&#x27;", '\''),
+    ("&#x2F;", '/'),
+    ("&#40;", '('),
+    ("&#41;", ')'),
+    ("&#91;", '['),
+    ("&#93;", ']'),
+    ("&#44;", ','),
+];
 
 #[cfg(test)]
 mod tests {
@@ -434,6 +481,22 @@ mod tests {
         let lrc = format_genie_lrc(&entries).expect("lrc should exist");
         assert!(lrc.contains("[00:01.03]그대여"));
         assert!(lrc.contains("[00:07.01]오늘은"));
+    }
+
+    #[test]
+    fn html_entity_decode_supports_existing_entities() {
+        let decoded = html_entity_decode(
+            "&amp; &quot; &#34; &#39; &apos; &lt; &gt; &#x27; &#x2F; &#40; &#41; &#91; &#93; &#44;",
+        );
+
+        assert_eq!(decoded, "& \" \" ' ' < > ' / ( ) [ ] ,");
+    }
+
+    #[test]
+    fn html_entity_decode_preserves_amp_escaped_later_entities() {
+        assert_eq!(html_entity_decode("&amp;quot;Hi&amp;quot;"), "\"Hi\"");
+        assert_eq!(html_entity_decode("&amp;lt;tag&amp;gt;"), "<tag>");
+        assert_eq!(html_entity_decode("&amp;amp;"), "&amp;");
     }
 
     #[test]

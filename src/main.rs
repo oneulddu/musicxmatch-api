@@ -45,6 +45,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CACHE_MAX_ENTRIES: usize = 2_000;
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const ADDON_RESTORE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
@@ -1229,6 +1230,7 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
             value: CachedLyrics::Success(Box::new(payload)),
         },
     );
+    enforce_cache_limit(&mut cache);
 }
 
 async fn store_negative_cache(state: &AppState, key: String, status: StatusCode, detail: String) {
@@ -1240,6 +1242,30 @@ async fn store_negative_cache(state: &AppState, key: String, status: StatusCode,
             value: CachedLyrics::Failure(CachedFailure { status, detail }),
         },
     );
+    enforce_cache_limit(&mut cache);
+}
+
+fn enforce_cache_limit(cache: &mut HashMap<String, CacheEntry>) {
+    if cache.len() <= CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let now = Instant::now();
+    cache.retain(|_, entry| entry.expires_at > now);
+    if cache.len() <= CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let mut entries = cache
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.expires_at))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, expires_at)| *expires_at);
+
+    let remove_count = cache.len().saturating_sub(CACHE_MAX_ENTRIES);
+    for (key, _) in entries.into_iter().take(remove_count) {
+        cache.remove(&key);
+    }
 }
 
 fn spawn_cache_cleanup_task(cache: Arc<Mutex<HashMap<String, CacheEntry>>>, logger: Logger) {
@@ -3017,6 +3043,24 @@ mod tests {
         assert_eq!(payload.track_id, Some(42));
         assert!(payload.cached);
         assert_eq!(payload.lrc.as_deref(), Some("[00:01.00]hello"));
+    }
+
+    #[tokio::test]
+    async fn cache_entry_count_is_capped_after_insert() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+
+        for index in 0..=CACHE_MAX_ENTRIES {
+            store_cache(
+                &state,
+                format!("cache-key-{index}"),
+                test_lyrics_payload(PROVIDER_NAME, index as u64, None, Some("plain lyrics")),
+            )
+            .await;
+        }
+
+        let cache_len = state.cache.lock().await.len();
+        assert!(cache_len <= CACHE_MAX_ENTRIES);
     }
 
     #[tokio::test]
