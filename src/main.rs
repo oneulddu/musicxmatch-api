@@ -1625,6 +1625,138 @@ fn build_cache_key(
     )
 }
 
+struct AutoFallbackResults {
+    deezer: Option<Result<LyricsPayload, DeezerError>>,
+    bugs: Result<LyricsPayload, BugsError>,
+    genie: Result<LyricsPayload, GenieError>,
+}
+
+async fn fetch_auto_fallback_payloads(
+    state: &AppState,
+    title: &str,
+    artist: &str,
+    duration_secs: Option<f32>,
+    include_debug: bool,
+) -> AutoFallbackResults {
+    let deezer_arl = current_deezer_arl(state).await;
+    let deezer_future = async {
+        match deezer_arl {
+            Some(arl) => Some(
+                fetch_deezer_payload(
+                    &state.deezer,
+                    &arl,
+                    title,
+                    artist,
+                    duration_secs,
+                    include_debug,
+                )
+                .await,
+            ),
+            None => None,
+        }
+    };
+    let bugs_future = fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug);
+    let genie_future =
+        fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug);
+    let (deezer, bugs, genie) = tokio::join!(deezer_future, bugs_future, genie_future);
+
+    AutoFallbackResults {
+        deezer,
+        bugs,
+        genie,
+    }
+}
+
+fn choose_auto_payload(candidates: Vec<LyricsPayload>) -> Option<LyricsPayload> {
+    let mut text_only = None;
+    for payload in candidates {
+        if payload.lrc.is_some() {
+            return Some(payload);
+        }
+        if text_only.is_none() {
+            text_only = Some(payload);
+        }
+    }
+    text_only
+}
+
+fn log_auto_candidate(logger: &Logger, payload: &LyricsPayload) {
+    if payload.lrc.is_none() {
+        logger.log_tagged(
+            provider_log_tag(payload.provider),
+            "text-only 결과 보류, synced 가사 탐색 계속",
+        );
+    }
+}
+
+fn append_auto_fallback_results(
+    results: AutoFallbackResults,
+    logger: &Logger,
+    candidates: &mut Vec<LyricsPayload>,
+) -> (Option<DeezerError>, Option<BugsError>, Option<GenieError>) {
+    let deezer_error = match results.deezer {
+        Some(Ok(payload)) => {
+            log_auto_candidate(logger, &payload);
+            candidates.push(payload);
+            None
+        }
+        Some(Err(error)) => {
+            logger.log_tagged("Deezer", &format!("fallback 조회 실패: {error}"));
+            Some(error)
+        }
+        None => None,
+    };
+
+    let bugs_error = match results.bugs {
+        Ok(payload) => {
+            log_auto_candidate(logger, &payload);
+            candidates.push(payload);
+            None
+        }
+        Err(error) => {
+            logger.log_tagged("Bugs", &format!("fallback 조회 실패: {error}"));
+            Some(error)
+        }
+    };
+
+    let genie_error = match results.genie {
+        Ok(payload) => {
+            log_auto_candidate(logger, &payload);
+            candidates.push(payload);
+            None
+        }
+        Err(error) => {
+            logger.log_tagged("Genie", &format!("fallback 조회 실패: {error}"));
+            Some(error)
+        }
+    };
+
+    (deezer_error, bugs_error, genie_error)
+}
+
+fn select_auto_error(
+    mxm_error: MxmError,
+    deezer_error: Option<DeezerError>,
+    bugs_error: Option<BugsError>,
+    genie_error: Option<GenieError>,
+) -> LyricsError {
+    if let Some(deezer_error) = deezer_error {
+        return LyricsError::Deezer(deezer_error);
+    }
+    if let Some(bugs_error) = bugs_error {
+        if matches!(&mxm_error, MxmError::NotFound | MxmError::NotAvailable) {
+            return LyricsError::Bugs(bugs_error);
+        }
+        return LyricsError::Musixmatch(mxm_error);
+    }
+    if let Some(genie_error) = genie_error {
+        if matches!(&mxm_error, MxmError::NotFound | MxmError::NotAvailable) {
+            return LyricsError::Genie(genie_error);
+        }
+    }
+    LyricsError::Musixmatch(mxm_error)
+}
+
 async fn fetch_payload(
     state: &AppState,
     title: &str,
@@ -1670,79 +1802,61 @@ async fn fetch_payload(
                 .await
                 .map_err(LyricsError::Genie)
         }
-        BackendMode::Auto => match fetch_musixmatch_payload(
-            &state.mxm,
-            title,
-            artist,
-            spotify_id,
-            duration_secs,
-            include_debug,
-        )
-        .await
-        {
-            Ok(payload) => Ok(payload),
-            Err(error) => {
-                state.logger.log_tagged(
-                    "MusicXMatch",
-                    &format!("조회 실패, fallback provider 시도: {error}"),
-                );
-                let mut deezer_error = None;
-                if let Some(arl) = current_deezer_arl(state).await {
-                    match fetch_deezer_payload(
-                        &state.deezer,
-                        &arl,
-                        title,
-                        artist,
-                        duration_secs,
-                        include_debug,
-                    )
-                    .await
-                    {
-                        Ok(payload) => return Ok(payload),
-                        Err(next_error) => {
-                            state.logger.log_tagged(
-                                "Deezer",
-                                &format!("fallback 조회 실패, Bugs provider 시도: {next_error}"),
-                            );
-                            deezer_error = Some(next_error);
-                        }
-                    }
+        BackendMode::Auto => {
+            let mut candidates = Vec::new();
+            let mxm_error = match fetch_musixmatch_payload(
+                &state.mxm,
+                title,
+                artist,
+                spotify_id,
+                duration_secs,
+                include_debug,
+            )
+            .await
+            {
+                Ok(payload) if payload.lrc.is_some() => return Ok(payload),
+                Ok(payload) => {
+                    log_auto_candidate(&state.logger, &payload);
+                    candidates.push(payload);
+                    None
                 }
-
-                let bugs_result =
-                    fetch_bugs_payload(&state.bugs, title, artist, duration_secs, include_debug)
-                        .await;
-                if let Ok(payload) = bugs_result {
-                    return Ok(payload);
+                Err(error) => {
+                    state.logger.log_tagged(
+                        "MusicXMatch",
+                        &format!("조회 실패, fallback provider 병렬 시도: {error}"),
+                    );
+                    Some(error)
                 }
+            };
 
-                let bugs_error = bugs_result.err();
-                state
-                    .logger
-                    .log_tagged("Bugs", "fallback 조회 실패, Genie provider 시도");
+            let fallback_results =
+                fetch_auto_fallback_payloads(state, title, artist, duration_secs, include_debug)
+                    .await;
+            let (deezer_error, bugs_error, genie_error) =
+                append_auto_fallback_results(fallback_results, &state.logger, &mut candidates);
 
-                match fetch_genie_payload(&state.genie, title, artist, duration_secs, include_debug)
-                    .await
-                {
-                    Ok(payload) => Ok(payload),
-                    Err(next_error) => {
-                        if let Some(deezer_error) = deezer_error {
-                            Err(LyricsError::Deezer(deezer_error))
-                        } else if let Some(bugs_error) = bugs_error {
-                            if matches!(error, MxmError::NotFound | MxmError::NotAvailable) {
-                                Err(LyricsError::Bugs(bugs_error))
-                            } else {
-                                Err(LyricsError::Musixmatch(error))
-                            }
-                        } else if matches!(error, MxmError::NotFound | MxmError::NotAvailable) {
-                            Err(LyricsError::Genie(next_error))
-                        } else {
-                            Err(LyricsError::Musixmatch(error))
-                        }
-                    }
+            if let Some(payload) = choose_auto_payload(candidates) {
+                if payload.lrc.is_some() {
+                    state.logger.log_tagged(
+                        provider_log_tag(payload.provider),
+                        "synced 가사 발견, 보류 결과 대신 사용",
+                    );
+                } else {
+                    state.logger.log_tagged(
+                        provider_log_tag(payload.provider),
+                        "synced 가사 없음, 보류한 text-only 결과 반환",
+                    );
                 }
+                return Ok(payload);
             }
-        },
+
+            Err(select_auto_error(
+                mxm_error.expect("fallbacks without candidates require a MusicXMatch error"),
+                deezer_error,
+                bugs_error,
+                genie_error,
+            ))
+        }
     }
 }
 
@@ -2533,6 +2647,52 @@ mod tests {
         assert_ne!(short, long);
         assert_ne!(short, unknown_duration);
         assert!(short.ends_with(":duration:180s"));
+    }
+
+    fn test_lyrics_payload(
+        provider: &'static str,
+        track_id: u64,
+        lrc: Option<&str>,
+        text: Option<&str>,
+    ) -> LyricsPayload {
+        LyricsPayload {
+            provider,
+            track_id: Some(track_id),
+            track_name: Some(format!("Track {track_id}")),
+            artist_name: Some("Artist".to_string()),
+            lrc: lrc.map(str::to_string),
+            text: text.map(str::to_string),
+            cached: false,
+            matched_by: Some("test"),
+            debug: None,
+        }
+    }
+
+    #[test]
+    fn auto_payload_selection_prefers_lrc_after_text_only_candidate() {
+        let selected = choose_auto_payload(vec![
+            test_lyrics_payload(PROVIDER_NAME, 1, None, Some("plain lyrics")),
+            test_lyrics_payload(BUGS_PROVIDER_NAME, 2, Some("[00:01.00]synced"), None),
+        ])
+        .expect("synced candidate should be selected");
+
+        assert_eq!(selected.provider, BUGS_PROVIDER_NAME);
+        assert_eq!(selected.track_id, Some(2));
+        assert!(selected.lrc.is_some());
+    }
+
+    #[test]
+    fn auto_payload_selection_uses_first_text_only_when_no_lrc_exists() {
+        let selected = choose_auto_payload(vec![
+            test_lyrics_payload(PROVIDER_NAME, 1, None, Some("first plain lyrics")),
+            test_lyrics_payload(DEEZER_PROVIDER_NAME, 2, None, Some("second plain lyrics")),
+            test_lyrics_payload(BUGS_PROVIDER_NAME, 3, None, Some("third plain lyrics")),
+        ])
+        .expect("text-only candidate should be selected");
+
+        assert_eq!(selected.provider, PROVIDER_NAME);
+        assert_eq!(selected.track_id, Some(1));
+        assert_eq!(selected.text.as_deref(), Some("first plain lyrics"));
     }
 
     #[test]

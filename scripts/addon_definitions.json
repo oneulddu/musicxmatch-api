@@ -1,6 +1,6 @@
 {
-  "version": "0.7.17",
-  "updated": "2026-06-08",
+  "version": "0.7.18",
+  "updated": "2026-06-10",
   "defaultServerUrl": "http://127.0.0.1:8092",
   "defaultTimeoutSec": 15,
   "rawBaseUrl": "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/main",
