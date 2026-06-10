@@ -2548,7 +2548,7 @@ fn is_auto_negative_cacheable(
     is_negative_cacheable_mxm_error(mxm_error)
         && deezer_error
             .map(is_negative_cacheable_deezer_error)
-            .unwrap_or(true)
+            .unwrap_or(false)
         && bugs_error
             .map(is_negative_cacheable_bugs_error)
             .unwrap_or(false)
@@ -2587,13 +2587,11 @@ fn is_negative_cacheable_error(error: &LyricsError) -> bool {
 
 fn can_store_negative_cache_for_query(
     backend: BackendMode,
-    title: &str,
-    artist: &str,
+    _title: &str,
+    _artist: &str,
     spotify_id: &str,
 ) -> bool {
-    spotify_id.is_empty()
-        || (!title.is_empty() && !artist.is_empty())
-        || matches!(backend, BackendMode::Musicxmatch)
+    spotify_id.is_empty() || matches!(backend, BackendMode::Musicxmatch)
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
@@ -3107,10 +3105,16 @@ mod tests {
             Some(&BugsError::NotFound),
             Some(&GenieError::NotAvailable),
         ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            None,
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
     }
 
     #[test]
-    fn negative_cache_skips_spotify_only_metadata_dependent_backends() {
+    fn negative_cache_skips_spotify_id_metadata_dependent_backends() {
         assert!(!can_store_negative_cache_for_query(
             BackendMode::Auto,
             "",
@@ -3141,11 +3145,23 @@ mod tests {
             "",
             "spotify123",
         ));
-        assert!(can_store_negative_cache_for_query(
+        assert!(!can_store_negative_cache_for_query(
             BackendMode::Auto,
             "Tell Me",
             "CAMO",
             "spotify123",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "Tell Me",
+            "CAMO",
+            "",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Bugs,
+            "Tell Me",
+            "CAMO",
+            "",
         ));
     }
 }
