@@ -44,6 +44,7 @@ use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const ADDON_RESTORE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 10;
@@ -79,7 +80,19 @@ struct AppState {
 #[derive(Clone)]
 struct CacheEntry {
     expires_at: Instant,
-    payload: LyricsPayload,
+    value: CachedLyrics,
+}
+
+#[derive(Clone)]
+enum CachedLyrics {
+    Success(Box<LyricsPayload>),
+    Failure(CachedFailure),
+}
+
+#[derive(Clone)]
+struct CachedFailure {
+    status: StatusCode,
+    detail: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,6 +206,10 @@ enum LyricsError {
     Deezer(DeezerError),
     Bugs(BugsError),
     Genie(GenieError),
+    Auto {
+        selected: Box<LyricsError>,
+        negative_cacheable: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,20 +627,45 @@ async fn get_lyrics(
     }
 
     let cache_key = build_cache_key(&title, &artist, &spotify_id, query.duration_ms, backend);
-    if let Some(cached) = cached_payload(&state, &cache_key).await {
-        state.logger.log_tagged(
-            provider_log_tag(cached.provider),
-            &format!(
-                "캐시 사용 title={:?} artist={:?} matched_by={} track_id={} synced={} plain={} key={cache_key}",
-                display_str(&title),
-                display_str(&artist),
-                matched_by_text(cached.matched_by),
-                display_opt_u64(cached.track_id),
-                bool_text(cached.lrc.is_some()),
-                bool_text(cached.text.is_some())
-            ),
-        );
-        return json_response(StatusCode::OK, cached);
+    if let Some(cached) = cached_lyrics(&state, &cache_key).await {
+        match cached {
+            CachedLyrics::Success(payload) => {
+                let payload = *payload;
+                state.logger.log_tagged(
+                    provider_log_tag(payload.provider),
+                    &format!(
+                        "캐시 사용 title={:?} artist={:?} matched_by={} track_id={} synced={} plain={} key={cache_key}",
+                        display_str(&title),
+                        display_str(&artist),
+                        matched_by_text(payload.matched_by),
+                        display_opt_u64(payload.track_id),
+                        bool_text(payload.lrc.is_some()),
+                        bool_text(payload.text.is_some())
+                    ),
+                );
+                return json_response(StatusCode::OK, payload);
+            }
+            CachedLyrics::Failure(failure) => {
+                state.logger.log_tagged(
+                    request_tag,
+                    &format!(
+                        "실패 캐시 사용 title={:?} artist={:?} spotify_id={:?} status={} detail={} raw_detail={}",
+                        display_str(&title),
+                        display_str(&artist),
+                        display_str(&spotify_id),
+                        failure.status.as_u16(),
+                        translate_log_detail(&failure.detail),
+                        failure.detail
+                    ),
+                );
+                return json_response(
+                    failure.status,
+                    ErrorPayload {
+                        detail: failure.detail,
+                    },
+                );
+            }
+        }
     }
 
     match fetch_payload(
@@ -655,6 +697,8 @@ async fn get_lyrics(
             json_response(StatusCode::OK, payload)
         }
         Err(error) => {
+            let cacheable_failure = is_negative_cacheable_error(&error)
+                && can_store_negative_cache_for_query(backend, &title, &artist, &spotify_id);
             let (status, detail) = map_error(error);
             state.logger.log_tagged(
                 request_tag,
@@ -667,6 +711,9 @@ async fn get_lyrics(
                     translate_log_detail(&detail),
                 ),
             );
+            if cacheable_failure {
+                store_negative_cache(&state, cache_key, status, detail.clone()).await;
+            }
             json_response(status, ErrorPayload { detail })
         }
     }
@@ -1145,13 +1192,18 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     }
 }
 
-async fn cached_payload(state: &AppState, key: &str) -> Option<LyricsPayload> {
+async fn cached_lyrics(state: &AppState, key: &str) -> Option<CachedLyrics> {
     let mut cache = state.cache.lock().await;
     if let Some(entry) = cache.get(key) {
         if Instant::now() < entry.expires_at {
-            let mut payload = entry.payload.clone();
-            payload.cached = true;
-            return Some(payload);
+            return Some(match &entry.value {
+                CachedLyrics::Success(payload) => {
+                    let mut payload = payload.as_ref().clone();
+                    payload.cached = true;
+                    CachedLyrics::Success(Box::new(payload))
+                }
+                CachedLyrics::Failure(failure) => CachedLyrics::Failure(failure.clone()),
+            });
         }
     }
     cache.remove(key);
@@ -1164,7 +1216,18 @@ async fn store_cache(state: &AppState, key: String, payload: LyricsPayload) {
         key,
         CacheEntry {
             expires_at: Instant::now() + CACHE_TTL,
-            payload,
+            value: CachedLyrics::Success(Box::new(payload)),
+        },
+    );
+}
+
+async fn store_negative_cache(state: &AppState, key: String, status: StatusCode, detail: String) {
+    let mut cache = state.cache.lock().await;
+    cache.insert(
+        key,
+        CacheEntry {
+            expires_at: Instant::now() + NEGATIVE_CACHE_TTL,
+            value: CachedLyrics::Failure(CachedFailure { status, detail }),
         },
     );
 }
@@ -1854,12 +1917,20 @@ async fn fetch_payload(
                 return Ok(payload);
             }
 
-            Err(select_auto_error(
-                mxm_error.expect("fallbacks without candidates require a MusicXMatch error"),
-                deezer_error,
-                bugs_error,
-                genie_error,
-            ))
+            let mxm_error =
+                mxm_error.expect("fallbacks without candidates require a MusicXMatch error");
+            let negative_cacheable = is_auto_negative_cacheable(
+                &mxm_error,
+                deezer_error.as_ref(),
+                bugs_error.as_ref(),
+                genie_error.as_ref(),
+            );
+            let selected = select_auto_error(mxm_error, deezer_error, bugs_error, genie_error);
+
+            Err(LyricsError::Auto {
+                selected: Box::new(selected),
+                negative_cacheable,
+            })
         }
     }
 }
@@ -2468,8 +2539,64 @@ where
     })
 }
 
+fn is_auto_negative_cacheable(
+    mxm_error: &MxmError,
+    deezer_error: Option<&DeezerError>,
+    bugs_error: Option<&BugsError>,
+    genie_error: Option<&GenieError>,
+) -> bool {
+    is_negative_cacheable_mxm_error(mxm_error)
+        && deezer_error
+            .map(is_negative_cacheable_deezer_error)
+            .unwrap_or(false)
+        && bugs_error
+            .map(is_negative_cacheable_bugs_error)
+            .unwrap_or(false)
+        && genie_error
+            .map(is_negative_cacheable_genie_error)
+            .unwrap_or(false)
+}
+
+fn is_negative_cacheable_mxm_error(error: &MxmError) -> bool {
+    matches!(error, MxmError::NotFound | MxmError::NotAvailable)
+}
+
+fn is_negative_cacheable_deezer_error(error: &DeezerError) -> bool {
+    matches!(error, DeezerError::NotFound | DeezerError::NotAvailable)
+}
+
+fn is_negative_cacheable_bugs_error(error: &BugsError) -> bool {
+    matches!(error, BugsError::NotFound | BugsError::NotAvailable)
+}
+
+fn is_negative_cacheable_genie_error(error: &GenieError) -> bool {
+    matches!(error, GenieError::NotFound | GenieError::NotAvailable)
+}
+
+fn is_negative_cacheable_error(error: &LyricsError) -> bool {
+    match error {
+        LyricsError::Bugs(error) => is_negative_cacheable_bugs_error(error),
+        LyricsError::Genie(error) => is_negative_cacheable_genie_error(error),
+        LyricsError::Deezer(error) => is_negative_cacheable_deezer_error(error),
+        LyricsError::Musixmatch(error) => is_negative_cacheable_mxm_error(error),
+        LyricsError::Auto {
+            negative_cacheable, ..
+        } => *negative_cacheable,
+    }
+}
+
+fn can_store_negative_cache_for_query(
+    _backend: BackendMode,
+    _title: &str,
+    _artist: &str,
+    spotify_id: &str,
+) -> bool {
+    spotify_id.is_empty()
+}
+
 fn map_error(error: LyricsError) -> (StatusCode, String) {
     match error {
+        LyricsError::Auto { selected, .. } => map_error(*selected),
         LyricsError::Bugs(BugsError::NotFound) => no_tracks_found(),
         LyricsError::Bugs(BugsError::NotAvailable) => no_lyrics_available(),
         LyricsError::Bugs(BugsError::Ratelimit) => rate_limit("Bugs"),
@@ -2912,5 +3039,129 @@ mod tests {
         assert_eq!(payload.track_id, Some(42));
         assert!(payload.cached);
         assert_eq!(payload.lrc.as_deref(), Some("[00:01.00]hello"));
+    }
+
+    #[tokio::test]
+    async fn not_found_failures_are_cached_with_original_response() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+        let cache_key = build_cache_key("Missing", "Artist", "", None, BackendMode::Bugs);
+        let error = LyricsError::Bugs(BugsError::NotFound);
+
+        assert!(is_negative_cacheable_error(&error));
+        let (status, detail) = map_error(error);
+        store_negative_cache(&state, cache_key, status, detail.clone()).await;
+
+        let response = get_lyrics(
+            State(state.clone()),
+            Query(LyricsQuery {
+                title: Some("Missing".to_string()),
+                artist: Some("Artist".to_string()),
+                spotify_id: None,
+                duration_ms: None,
+                backend: Some("bugs".to_string()),
+                debug: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload: ErrorPayload = parse_response_json(response).await;
+        assert_eq!(payload.detail, detail);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_failures_are_not_negative_cached() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+        let cache_key = build_cache_key("Busy", "Artist", "", None, BackendMode::Bugs);
+        let error = LyricsError::Bugs(BugsError::Ratelimit);
+
+        assert!(!is_negative_cacheable_error(&error));
+        let (status, _detail) = map_error(error);
+
+        assert!(cached_lyrics(&state, &cache_key).await.is_none());
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn auto_negative_cache_requires_all_attempted_errors_to_be_misses() {
+        assert!(is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::Ratelimit),
+            Some(&GenieError::NotAvailable),
+        ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::Ratelimit,
+            Some(&DeezerError::NotAvailable),
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
+        assert!(!is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            None,
+            Some(&BugsError::NotFound),
+            Some(&GenieError::NotAvailable),
+        ));
+    }
+
+    #[test]
+    fn negative_cache_skips_spotify_id_metadata_dependent_backends() {
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Bugs,
+            "Tell Me",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Genie,
+            "",
+            "CAMO",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Deezer,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Musicxmatch,
+            "",
+            "",
+            "spotify123",
+        ));
+        assert!(!can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "Tell Me",
+            "CAMO",
+            "spotify123",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Auto,
+            "Tell Me",
+            "CAMO",
+            "",
+        ));
+        assert!(can_store_negative_cache_for_query(
+            BackendMode::Bugs,
+            "Tell Me",
+            "CAMO",
+            "",
+        ));
     }
 }
