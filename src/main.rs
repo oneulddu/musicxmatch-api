@@ -699,7 +699,7 @@ async fn get_lyrics(
         }
         Err(error) => {
             let cacheable_failure = is_negative_cacheable_error(&error)
-                && can_store_negative_cache_for_query(backend, &title, &artist, &spotify_id);
+                && can_store_negative_cache_for_query(&title, &artist, &spotify_id);
             let (status, detail) = map_error(error);
             state.logger.log_tagged(
                 request_tag,
@@ -2545,13 +2545,13 @@ fn is_auto_negative_cacheable(
     is_negative_cacheable_mxm_error(mxm_error)
         && deezer_error
             .map(is_negative_cacheable_deezer_error)
-            .unwrap_or(false)
+            .unwrap_or(true)
         && bugs_error
             .map(is_negative_cacheable_bugs_error)
-            .unwrap_or(false)
+            .unwrap_or(true)
         && genie_error
             .map(is_negative_cacheable_genie_error)
-            .unwrap_or(false)
+            .unwrap_or(true)
 }
 
 fn is_negative_cacheable_mxm_error(error: &MxmError) -> bool {
@@ -2582,13 +2582,8 @@ fn is_negative_cacheable_error(error: &LyricsError) -> bool {
     }
 }
 
-fn can_store_negative_cache_for_query(
-    _backend: BackendMode,
-    _title: &str,
-    _artist: &str,
-    spotify_id: &str,
-) -> bool {
-    spotify_id.is_empty()
+fn can_store_negative_cache_for_query(title: &str, artist: &str, spotify_id: &str) -> bool {
+    spotify_id.is_empty() || (!title.trim().is_empty() && !artist.trim().is_empty())
 }
 
 fn map_error(error: LyricsError) -> (StatusCode, String) {
@@ -3094,6 +3089,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spotify_id_requests_with_title_artist_can_store_negative_cache() {
+        let config_path = test_path("config");
+        let state = test_state(AppConfig::default(), config_path);
+        let cache_key = build_cache_key("Missing", "Artist", "spotify123", None, BackendMode::Bugs);
+        let error = LyricsError::Bugs(BugsError::NotFound);
+
+        assert!(is_negative_cacheable_error(&error));
+        assert!(can_store_negative_cache_for_query(
+            "Missing",
+            "Artist",
+            "spotify123",
+        ));
+
+        let (status, detail) = map_error(error);
+        store_negative_cache(&state, cache_key.clone(), status, detail.clone()).await;
+
+        let cached = cached_lyrics(&state, &cache_key)
+            .await
+            .expect("negative cache should be stored");
+        match cached {
+            CachedLyrics::Failure(failure) => {
+                assert_eq!(failure.status, StatusCode::NOT_FOUND);
+                assert_eq!(failure.detail, detail);
+            }
+            CachedLyrics::Success(_) => panic!("expected negative cache entry"),
+        }
+    }
+
+    #[tokio::test]
     async fn rate_limit_failures_are_not_negative_cached() {
         let config_path = test_path("config");
         let state = test_state(AppConfig::default(), config_path);
@@ -3130,60 +3154,39 @@ mod tests {
         assert!(!is_auto_negative_cacheable(
             &MxmError::NotFound,
             None,
+            Some(&BugsError::Ratelimit),
+            Some(&GenieError::NotAvailable),
+        ));
+    }
+
+    #[test]
+    fn auto_negative_cache_ignores_unattempted_deezer() {
+        assert!(is_auto_negative_cacheable(
+            &MxmError::NotFound,
+            None,
             Some(&BugsError::NotFound),
             Some(&GenieError::NotAvailable),
         ));
     }
 
     #[test]
-    fn negative_cache_skips_spotify_id_metadata_dependent_backends() {
+    fn negative_cache_allows_spotify_id_when_title_artist_are_present() {
+        assert!(!can_store_negative_cache_for_query("", "", "spotify123"));
         assert!(!can_store_negative_cache_for_query(
-            BackendMode::Auto,
-            "",
-            "",
-            "spotify123",
-        ));
-        assert!(!can_store_negative_cache_for_query(
-            BackendMode::Bugs,
             "Tell Me",
             "",
             "spotify123",
         ));
         assert!(!can_store_negative_cache_for_query(
-            BackendMode::Genie,
             "",
-            "CAMO",
-            "spotify123",
-        ));
-        assert!(!can_store_negative_cache_for_query(
-            BackendMode::Deezer,
-            "",
-            "",
-            "spotify123",
-        ));
-        assert!(!can_store_negative_cache_for_query(
-            BackendMode::Musicxmatch,
-            "",
-            "",
-            "spotify123",
-        ));
-        assert!(!can_store_negative_cache_for_query(
-            BackendMode::Auto,
-            "Tell Me",
             "CAMO",
             "spotify123",
         ));
         assert!(can_store_negative_cache_for_query(
-            BackendMode::Auto,
             "Tell Me",
             "CAMO",
-            "",
+            "spotify123",
         ));
-        assert!(can_store_negative_cache_for_query(
-            BackendMode::Bugs,
-            "Tell Me",
-            "CAMO",
-            "",
-        ));
+        assert!(can_store_negative_cache_for_query("Tell Me", "CAMO", ""));
     }
 }
