@@ -1715,6 +1715,14 @@ fn build_cache_key(
         })
         .unwrap_or_default();
     if !spotify_id.is_empty() {
+        if !title.trim().is_empty() && !artist.trim().is_empty() {
+            return format!(
+                "{prefix}:spotify:{spotify_id}:{}::{}{}",
+                normalize(title),
+                normalize(artist),
+                duration_part
+            );
+        }
         return format!("{prefix}:spotify:{spotify_id}{duration_part}");
     }
     format!(
@@ -2777,6 +2785,24 @@ mod tests {
         assert_ne!(short, long);
         assert_ne!(short, unknown_duration);
         assert!(short.ends_with(":duration:180s"));
+    }
+
+    #[test]
+    fn spotify_cache_keys_include_metadata_when_available() {
+        let first = build_cache_key("Tell Me", "CAMO", "spotify123", None, BackendMode::Auto);
+        let corrected = build_cache_key(
+            "Tell Me Remix",
+            "CAMO",
+            "spotify123",
+            None,
+            BackendMode::Auto,
+        );
+        let metadata_missing = build_cache_key("", "", "spotify123", None, BackendMode::Auto);
+
+        assert_ne!(first, corrected);
+        assert_ne!(first, metadata_missing);
+        assert!(first.contains(&normalize("Tell Me")));
+        assert!(first.contains(&normalize("CAMO")));
     }
 
     fn test_lyrics_payload(
