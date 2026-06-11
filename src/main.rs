@@ -523,10 +523,15 @@ async fn health_payload(state: &AppState, update_available: bool) -> HealthPaylo
 
 async fn clear_cache(State(state): State<AppState>) -> Response {
     state.logger.log_tagged("Server", "DELETE /cache 요청");
+    let deleted = clear_runtime_cache(&state).await;
+    json_response(StatusCode::OK, serde_json::json!({ "deleted": deleted }))
+}
+
+async fn clear_runtime_cache(state: &AppState) -> usize {
     let mut cache = state.cache.lock().await;
     let deleted = cache.len();
     cache.clear();
-    json_response(StatusCode::OK, serde_json::json!({ "deleted": deleted }))
+    deleted
 }
 
 async fn get_config(State(state): State<AppState>) -> Response {
@@ -582,7 +587,19 @@ async fn save_config(
         );
     }
 
-    *state.config.lock().await = next.clone();
+    let previous = {
+        let mut config = state.config.lock().await;
+        let previous = config.clone();
+        *config = next.clone();
+        previous
+    };
+    if previous.deezer_arl != next.deezer_arl {
+        let deleted = clear_runtime_cache(&state).await;
+        state.logger.log_tagged(
+            "Server",
+            &format!("Deezer 설정 변경으로 캐시 초기화 deleted={deleted}"),
+        );
+    }
     if next.deezer_arl.is_none() {
         state.deezer.clear_token().await;
     }
@@ -2934,6 +2951,12 @@ mod tests {
             },
             config_path.clone(),
         );
+        store_cache(
+            &state,
+            build_cache_key("Tell Me", "CAMO", "", None, BackendMode::Auto),
+            test_lyrics_payload(PROVIDER_NAME, 1, None, Some("plain lyrics")),
+        )
+        .await;
 
         let response = save_config(
             State(state.clone()),
@@ -2948,6 +2971,7 @@ mod tests {
         let saved = fs::read_to_string(&config_path).expect("config should be written");
         let parsed: AppConfig = serde_json::from_str(&saved).expect("config json should parse");
         assert_eq!(parsed.deezer_arl, None);
+        assert_eq!(state.cache.lock().await.len(), 0);
     }
 
     #[cfg(unix)]
