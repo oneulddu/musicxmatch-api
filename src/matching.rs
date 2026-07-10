@@ -219,7 +219,6 @@ fn score_basic_match(
         score += duration_score((actual_duration - want_duration).abs());
     }
 
-    let noise = format!("{track_title} {track_artist}");
     for word in [
         "acoustic",
         "cover",
@@ -229,12 +228,16 @@ fn score_basic_match(
         "remix",
         "tribute",
     ] {
-        if noise.contains(word) {
+        if contains_word(&track_title, word) || contains_word(&track_artist, word) {
             score -= NOISE_PENALTY;
         }
     }
 
     score
+}
+
+fn contains_word(value: &str, expected: &str) -> bool {
+    value.split_whitespace().any(|word| word == expected)
 }
 
 pub fn duration_score(delta_secs: f32) -> f32 {
@@ -440,5 +443,20 @@ mod tests {
     #[test]
     fn strip_featured_handles_multibyte_case_expansion() {
         assert_eq!(strip_featured("İstanbul feat. Someone"), "İstanbul");
+    }
+
+    #[test]
+    fn noise_penalty_does_not_match_substrings() {
+        let track = Track {
+            track_id: 1,
+            track_name: "Alive".to_string(),
+            track_length: 180,
+            artist_name: "Artist".to_string(),
+            has_lyrics: false,
+            has_subtitles: false,
+            has_richsync: false,
+        };
+
+        assert_eq!(score_track(&track, "Alive", "Artist", None), 125.0);
     }
 }

@@ -111,22 +111,11 @@ impl BugsClient {
         &self,
         track: &BugsTrack,
     ) -> Result<BugsLyricsResult, BugsError> {
-        let lrc = self
-            .fetch_lyrics_body(track.track_id, true)
-            .await?
-            .as_deref()
-            .and_then(parse_synced_lyrics);
-
-        let text = self
-            .fetch_lyrics_body(track.track_id, false)
-            .await?
-            .as_deref()
-            .map(normalize_plain_lyrics)
-            .filter(|value| !value.is_empty());
-
-        if lrc.is_none() && text.is_none() {
-            return Err(BugsError::NotAvailable);
-        }
+        let (synced_body, plain_body) = tokio::join!(
+            self.fetch_lyrics_body(track.track_id, true),
+            self.fetch_lyrics_body(track.track_id, false),
+        );
+        let (lrc, text) = combine_lyrics_bodies(synced_body, plain_body)?;
 
         Ok(BugsLyricsResult {
             track_id: track.track_id,
@@ -167,6 +156,35 @@ impl BugsClient {
             .lyrics
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()))
+    }
+}
+
+fn combine_lyrics_bodies(
+    synced_body: Result<Option<String>, BugsError>,
+    plain_body: Result<Option<String>, BugsError>,
+) -> Result<(Option<String>, Option<String>), BugsError> {
+    let synced_body = optional_lyrics_body(synced_body)?;
+    let plain_body = optional_lyrics_body(plain_body)?;
+
+    let lrc = synced_body.as_deref().and_then(parse_synced_lyrics);
+    let text = plain_body
+        .as_deref()
+        .map(normalize_plain_lyrics)
+        .filter(|value| !value.is_empty());
+
+    if lrc.is_none() && text.is_none() {
+        Err(BugsError::NotAvailable)
+    } else {
+        Ok((lrc, text))
+    }
+}
+
+fn optional_lyrics_body(
+    body: Result<Option<String>, BugsError>,
+) -> Result<Option<String>, BugsError> {
+    match body {
+        Err(BugsError::NotFound | BugsError::NotAvailable) => Ok(None),
+        result => result,
     }
 }
 
@@ -329,5 +347,29 @@ mod tests {
         assert!(parsed.contains("[00:06.90]존나 멋 존나 멋 그건 누구겠어 뱃"));
         assert!(parsed.contains("[00:11.10]마이크로폰 첵 원투 난 일차원으로 해"));
         assert!(parsed.contains("[00:14.72]나는 꽤 멋쟁이야"));
+    }
+
+    #[test]
+    fn synced_lyrics_survive_missing_plain_lyrics() {
+        let (lrc, text) = combine_lyrics_bodies(
+            Ok(Some("7.3|동기 가사".to_string())),
+            Err(BugsError::NotAvailable),
+        )
+        .expect("the available lyrics format should be returned");
+
+        assert_eq!(lrc.as_deref(), Some("[00:07.30]동기 가사"));
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn plain_lyrics_survive_missing_synced_lyrics() {
+        let (lrc, text) = combine_lyrics_bodies(
+            Err(BugsError::NotAvailable),
+            Ok(Some("일반 가사\r\n두 번째 줄".to_string())),
+        )
+        .expect("the available lyrics format should be returned");
+
+        assert_eq!(lrc, None);
+        assert_eq!(text.as_deref(), Some("일반 가사\n두 번째 줄"));
     }
 }
