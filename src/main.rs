@@ -644,8 +644,15 @@ async fn get_lyrics(
             .into_response();
     }
 
-    let cache_key = build_cache_key(&title, &artist, &spotify_id, query.duration_ms, backend);
-    if let Some(cached) = cached_lyrics(&state, &cache_key).await {
+    let cache_key = build_request_cache_key(
+        &title,
+        &artist,
+        &spotify_id,
+        query.duration_ms,
+        backend,
+        include_debug,
+    );
+    if let Some(cached) = cached_lyrics(&state, &cache_key, include_debug).await {
         match cached {
             CachedLyrics::Success(payload) => {
                 let payload = *payload;
@@ -933,10 +940,15 @@ fn compare_versions(left: &str, right: &str) -> i32 {
     let b = parse_version(right);
     let length = a.len().max(b.len());
     for index in 0..length {
-        let delta = (a.get(index).copied().unwrap_or(0) as i32)
-            - (b.get(index).copied().unwrap_or(0) as i32);
-        if delta != 0 {
-            return delta;
+        match a
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&b.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Less => return -1,
+            std::cmp::Ordering::Greater => return 1,
+            std::cmp::Ordering::Equal => {}
         }
     }
     0
@@ -1220,7 +1232,7 @@ fn spawn_update_process(include_addon: bool) -> Result<(), String> {
     }
 }
 
-async fn cached_lyrics(state: &AppState, key: &str) -> Option<CachedLyrics> {
+async fn cached_lyrics(state: &AppState, key: &str, include_debug: bool) -> Option<CachedLyrics> {
     let mut cache = state.cache.lock().await;
     if let Some(entry) = cache.get(key) {
         if Instant::now() < entry.expires_at {
@@ -1228,6 +1240,9 @@ async fn cached_lyrics(state: &AppState, key: &str) -> Option<CachedLyrics> {
                 CachedLyrics::Success(payload) => {
                     let mut payload = payload.as_ref().clone();
                     payload.cached = true;
+                    if !include_debug {
+                        payload.debug = None;
+                    }
                     CachedLyrics::Success(Box::new(payload))
                 }
                 CachedLyrics::Failure(failure) => CachedLyrics::Failure(failure.clone()),
@@ -1273,14 +1288,19 @@ fn enforce_cache_limit(cache: &mut HashMap<String, CacheEntry>) {
         return;
     }
 
+    let remove_count = cache.len().saturating_sub(CACHE_MAX_ENTRIES);
     let mut entries = cache
         .iter()
-        .map(|(key, entry)| (key.clone(), entry.expires_at))
+        .map(|(key, entry)| (key, entry.expires_at))
         .collect::<Vec<_>>();
-    entries.sort_by_key(|(_, expires_at)| *expires_at);
+    entries.select_nth_unstable_by_key(remove_count - 1, |(_, expires_at)| *expires_at);
+    let keys_to_remove = entries
+        .into_iter()
+        .take(remove_count)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
 
-    let remove_count = cache.len().saturating_sub(CACHE_MAX_ENTRIES);
-    for (key, _) in entries.into_iter().take(remove_count) {
+    for key in keys_to_remove {
         cache.remove(&key);
     }
 }
@@ -1537,6 +1557,8 @@ async fn restore_known_provider_addons(
 
     let mut restored = Vec::new();
     let mut restore_errors = Vec::new();
+    let mut resolved_repo_main_ref = None;
+    let mut repo_main_ref_lookup_attempted = false;
     for filename in KNOWN_PROVIDER_ADDONS {
         let source = sources
             .get(filename)
@@ -1558,7 +1580,15 @@ async fn restore_known_provider_addons(
         let mut file_available = file_exists;
 
         if let Some(source) = source {
-            match fetch_addon_source(client, &source).await {
+            if is_repo_main_source(&source) && !repo_main_ref_lookup_attempted {
+                resolved_repo_main_ref = match client {
+                    Some(client) => resolve_repo_main_ref(client).await,
+                    None => None,
+                };
+                repo_main_ref_lookup_attempted = true;
+            }
+
+            match fetch_addon_source(client, &source, resolved_repo_main_ref.as_deref()).await {
                 Ok(content) => match std::fs::write(&target_path, content) {
                     Ok(()) => {
                         file_available = true;
@@ -1644,6 +1674,7 @@ fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
 async fn fetch_addon_source(
     client: Option<&reqwest::Client>,
     source: &str,
+    resolved_repo_main_ref: Option<&str>,
 ) -> Result<String, String> {
     if let Some(path) = source.strip_prefix("local:") {
         return std::fs::read_to_string(path).map_err(|error| error.to_string());
@@ -1651,15 +1682,7 @@ async fn fetch_addon_source(
 
     if source.starts_with("http://") || source.starts_with("https://") {
         let client = client.ok_or_else(|| "HTTP client is not available".to_string())?;
-        let mut download_url = source.to_string();
-        let repo_raw_main_prefix = format!("{REPO_RAW_MAIN_URL}/");
-        if let Some(relative_path) = source.strip_prefix(&repo_raw_main_prefix) {
-            if let Some(resolved_ref) = resolve_repo_main_ref(client).await {
-                download_url = format!(
-                    "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/{resolved_ref}/{relative_path}"
-                );
-            }
-        }
+        let download_url = addon_download_url(source, resolved_repo_main_ref);
 
         let response = client
             .get(download_url)
@@ -1673,6 +1696,26 @@ async fn fetch_addon_source(
     }
 
     std::fs::read_to_string(source).map_err(|error| error.to_string())
+}
+
+fn is_repo_main_source(source: &str) -> bool {
+    source
+        .strip_prefix(REPO_RAW_MAIN_URL)
+        .is_some_and(|relative_path| relative_path.starts_with('/'))
+}
+
+fn addon_download_url(source: &str, resolved_repo_main_ref: Option<&str>) -> String {
+    match (
+        source
+            .strip_prefix(REPO_RAW_MAIN_URL)
+            .and_then(|relative_path| relative_path.strip_prefix('/')),
+        resolved_repo_main_ref,
+    ) {
+        (Some(relative_path), Some(resolved_ref)) => format!(
+            "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/{resolved_ref}/{relative_path}"
+        ),
+        _ => source.to_string(),
+    }
 }
 
 async fn resolve_repo_main_ref(client: &reqwest::Client) -> Option<String> {
@@ -1727,7 +1770,7 @@ fn build_cache_key(
     };
     let duration_part = duration_ms
         .map(|value| {
-            let rounded = ((value + 500) / 1000).max(1);
+            let rounded = (value / 1000 + u64::from(value % 1000 >= 500)).max(1);
             format!(":duration:{rounded}s")
         })
         .unwrap_or_default();
@@ -1748,6 +1791,21 @@ fn build_cache_key(
         normalize(artist),
         duration_part
     )
+}
+
+fn build_request_cache_key(
+    title: &str,
+    artist: &str,
+    spotify_id: &str,
+    duration_ms: Option<u64>,
+    backend: BackendMode,
+    include_debug: bool,
+) -> String {
+    let mut key = build_cache_key(title, artist, spotify_id, duration_ms, backend);
+    if include_debug {
+        key.push_str(":debug");
+    }
+    key
 }
 
 struct AutoFallbackResults {
@@ -2002,7 +2060,7 @@ async fn fetch_musixmatch_payload(
     include_debug: bool,
 ) -> Result<LyricsPayload, MxmError> {
     if !spotify_id.is_empty() {
-        if let Ok(payload) = fetch_by_id(
+        let direct_result = fetch_by_id(
             mxm,
             TrackId::Spotify(spotify_id.to_owned().into()),
             None,
@@ -2019,9 +2077,11 @@ async fn fetch_musixmatch_payload(
                 )
             }),
         )
-        .await
-        {
-            return Ok(payload);
+        .await;
+        match direct_result {
+            Ok(payload) => return Ok(payload),
+            Err(error) if !has_search_metadata(title, artist) => return Err(error),
+            Err(_) => {}
         }
     }
 
@@ -2044,6 +2104,10 @@ async fn fetch_musixmatch_payload(
         }),
     )
     .await
+}
+
+fn has_search_metadata(title: &str, artist: &str) -> bool {
+    !title.trim().is_empty() && !artist.trim().is_empty()
 }
 
 async fn fetch_by_id(
@@ -2386,11 +2450,16 @@ async fn resolve_track(
 
     tracks_by_id
         .into_values()
-        .max_by(|left, right| {
-            score_track(left, title, artist, duration_secs)
-                .partial_cmp(&score_track(right, title, artist, duration_secs))
+        .map(|track| {
+            let score = score_track(&track, title, artist, duration_secs);
+            (track, score)
+        })
+        .max_by(|(_, left_score), (_, right_score)| {
+            left_score
+                .partial_cmp(right_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
+        .map(|(track, _)| track)
         .filter(|track| is_acceptable_match(track, title, artist, matched_by))
         .map(|track| TrackResolution {
             track,
@@ -2490,13 +2559,19 @@ where
         return Err(not_found_error());
     }
 
-    let mut candidates = tracks_by_id.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        score_provider_track(right, title, artist, duration_secs)
-            .partial_cmp(&score_provider_track(left, title, artist, duration_secs))
+    let mut candidates = tracks_by_id
+        .into_values()
+        .map(|track| {
+            let score = score_provider_track(&track, title, artist, duration_secs);
+            (track, score)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(_, left_score), (_, right_score)| {
+        right_score
+            .partial_cmp(left_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    candidates.retain(|track| {
+    candidates.retain(|(track, _)| {
         let actual_duration_secs = use_duration_for_acceptance
             .then(|| {
                 track
@@ -2519,7 +2594,7 @@ where
     }
 
     Ok(ProviderTrackResolution {
-        tracks: candidates,
+        tracks: candidates.into_iter().map(|(track, _)| track).collect(),
         matched_by,
         search_variants: attempted_variants,
     })
@@ -2751,6 +2826,7 @@ mod tests {
         assert!(compare_versions("0.3.2", "0.3.1") > 0);
         assert!(compare_versions("0.3.1", "0.3.2") < 0);
         assert_eq!(compare_versions("0.3.1", "0.3.1"), 0);
+        assert!(compare_versions("4294967295.0.0", "0.0.0") > 0);
     }
 
     #[test]
@@ -2778,6 +2854,21 @@ mod tests {
     }
 
     #[test]
+    fn addon_download_url_pins_only_repository_main_sources() {
+        let source = format!("{REPO_RAW_MAIN_URL}/Addon_Lyrics_Bugs.js");
+        assert!(is_repo_main_source(&source));
+        assert_eq!(
+            addon_download_url(&source, Some("abc123")),
+            "https://raw.githubusercontent.com/oneulddu/musicxmatch-api/abc123/Addon_Lyrics_Bugs.js"
+        );
+        assert_eq!(addon_download_url(&source, None), source);
+
+        let external = "https://example.com/Addon_Lyrics_Bugs.js";
+        assert!(!is_repo_main_source(external));
+        assert_eq!(addon_download_url(external, Some("abc123")), external);
+    }
+
+    #[test]
     fn cache_keys_include_backend_mode() {
         let auto = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Auto);
         let mxm = build_cache_key("Tell Me", "CAMO", "abc", None, BackendMode::Musicxmatch);
@@ -2798,10 +2889,12 @@ mod tests {
         let short = build_cache_key("Tell Me", "CAMO", "", Some(180_100), BackendMode::Auto);
         let long = build_cache_key("Tell Me", "CAMO", "", Some(240_100), BackendMode::Auto);
         let unknown_duration = build_cache_key("Tell Me", "CAMO", "", None, BackendMode::Auto);
+        let maximum = build_cache_key("Tell Me", "CAMO", "", Some(u64::MAX), BackendMode::Auto);
 
         assert_ne!(short, long);
         assert_ne!(short, unknown_duration);
         assert!(short.ends_with(":duration:180s"));
+        assert!(maximum.ends_with(&format!(":duration:{}s", u64::MAX / 1000 + 1)));
     }
 
     #[test]
@@ -2820,6 +2913,37 @@ mod tests {
         assert_ne!(first, metadata_missing);
         assert!(first.contains(&normalize("Tell Me")));
         assert!(first.contains(&normalize("CAMO")));
+    }
+
+    #[test]
+    fn debug_requests_use_an_isolated_cache_key() {
+        let regular = build_request_cache_key(
+            "Tell Me",
+            "CAMO",
+            "spotify123",
+            None,
+            BackendMode::Auto,
+            false,
+        );
+        let debug = build_request_cache_key(
+            "Tell Me",
+            "CAMO",
+            "spotify123",
+            None,
+            BackendMode::Auto,
+            true,
+        );
+
+        assert_ne!(regular, debug);
+        assert!(debug.ends_with(":debug"));
+    }
+
+    #[test]
+    fn spotify_metadata_fallback_requires_title_and_artist() {
+        assert!(!has_search_metadata("", ""));
+        assert!(!has_search_metadata("Tell Me", ""));
+        assert!(!has_search_metadata("", "CAMO"));
+        assert!(has_search_metadata("Tell Me", "CAMO"));
     }
 
     fn test_lyrics_payload(
@@ -3016,6 +3140,7 @@ mod tests {
         track_id: Option<u64>,
         lrc: Option<String>,
         cached: bool,
+        debug: Option<serde_json::Value>,
     }
 
     #[tokio::test]
@@ -3063,7 +3188,14 @@ mod tests {
                 text: None,
                 cached: false,
                 matched_by: Some("track_id"),
-                debug: None,
+                debug: Some(debug_payload(
+                    "test",
+                    "track_id",
+                    None,
+                    Some(42),
+                    None,
+                    Vec::new(),
+                )),
             },
         )
         .await;
@@ -3088,6 +3220,7 @@ mod tests {
         assert_eq!(payload.track_id, Some(42));
         assert!(payload.cached);
         assert_eq!(payload.lrc.as_deref(), Some("[00:01.00]hello"));
+        assert_eq!(payload.debug, None);
     }
 
     #[tokio::test]
@@ -3155,7 +3288,7 @@ mod tests {
         let (status, detail) = map_error(error);
         store_negative_cache(&state, cache_key.clone(), status, detail.clone()).await;
 
-        let cached = cached_lyrics(&state, &cache_key)
+        let cached = cached_lyrics(&state, &cache_key, false)
             .await
             .expect("negative cache should be stored");
         match cached {
@@ -3177,7 +3310,7 @@ mod tests {
         assert!(!is_negative_cacheable_error(&error));
         let (status, _detail) = map_error(error);
 
-        assert!(cached_lyrics(&state, &cache_key).await.is_none());
+        assert!(cached_lyrics(&state, &cache_key, false).await.is_none());
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 

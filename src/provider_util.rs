@@ -69,7 +69,7 @@ pub fn parse_duration_ms(value: &str) -> Option<u64> {
 pub fn format_lrc_timestamp_ms(milliseconds: u64, rounding: TimestampRounding) -> String {
     let total_centis = match rounding {
         TimestampRounding::Floor => milliseconds / 10,
-        TimestampRounding::Nearest => (milliseconds + 5) / 10,
+        TimestampRounding::Nearest => milliseconds / 10 + u64::from(milliseconds % 10 >= 5),
     };
     let minutes = total_centis / 6000;
     let secs = (total_centis / 100) % 60;
@@ -106,5 +106,6 @@ mod tests {
             format_lrc_timestamp_ms(1039, TimestampRounding::Nearest),
             "[00:01.04]"
         );
+        assert!(format_lrc_timestamp_ms(u64::MAX, TimestampRounding::Nearest).starts_with('['));
     }
 }
