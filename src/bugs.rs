@@ -20,6 +20,9 @@ pub struct BugsTrack {
     pub track_id: u64,
     pub track_name: String,
     pub artist_name: String,
+    /// Individual credited artists from Bugs' structured payload; used for
+    /// per-artist match acceptance so collaborations resolve correctly.
+    pub artist_names: Vec<String>,
     pub duration_ms: Option<u64>,
 }
 
@@ -102,6 +105,7 @@ impl BugsClient {
                 track_id: track.track_id,
                 track_name: track.track_title,
                 artist_name: join_artist_names(&track.artists),
+                artist_names: artist_name_list(&track.artists),
                 duration_ms: track.len.as_deref().and_then(parse_duration_ms),
             })
             .collect())
@@ -217,12 +221,15 @@ fn build_search_query(title: &str, artist: &str) -> String {
 }
 
 fn join_artist_names(artists: &[BugsArtist]) -> String {
+    artist_name_list(artists).join(", ")
+}
+
+fn artist_name_list(artists: &[BugsArtist]) -> Vec<String> {
     artists
         .iter()
-        .map(|artist| artist.artist_nm.trim())
+        .map(|artist| artist.artist_nm.trim().to_string())
         .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect()
 }
 
 fn parse_synced_lyrics(value: &str) -> Option<String> {

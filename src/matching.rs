@@ -17,7 +17,16 @@ const CLOSE_DURATION_BONUS: f32 = 10.0;
 const SMALL_DURATION_BONUS: f32 = 4.0;
 const MEDIUM_DURATION_PENALTY: f32 = -8.0;
 const LARGE_DURATION_PENALTY: f32 = -20.0;
-const EXACT_DURATION_MATCH_SECS: f32 = 2.5;
+
+const NOISE_WORDS: [&str; 7] = [
+    "acoustic",
+    "cover",
+    "instrumental",
+    "karaoke",
+    "live",
+    "remix",
+    "tribute",
+];
 
 pub fn title_variants(title: &str) -> Vec<String> {
     let mut values = Vec::new();
@@ -115,6 +124,11 @@ pub trait SearchableTrack {
     fn name(&self) -> &str;
     fn artist(&self) -> &str;
     fn duration_ms(&self) -> Option<u64>;
+    /// Individual credited artists when the provider exposes them as
+    /// structured data; defaults to the display name as a single credit.
+    fn credited_artists(&self) -> Vec<String> {
+        vec![self.artist().to_string()]
+    }
 }
 
 impl SearchableTrack for DeezerTrack {
@@ -150,6 +164,14 @@ impl SearchableTrack for BugsTrack {
 
     fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
+    }
+
+    fn credited_artists(&self) -> Vec<String> {
+        if self.artist_names.is_empty() {
+            vec![self.artist_name.clone()]
+        } else {
+            self.artist_names.clone()
+        }
     }
 }
 
@@ -223,15 +245,7 @@ fn score_basic_match(
         score += duration_score((actual_duration - want_duration).abs());
     }
 
-    for word in [
-        "acoustic",
-        "cover",
-        "instrumental",
-        "karaoke",
-        "live",
-        "remix",
-        "tribute",
-    ] {
+    for word in NOISE_WORDS {
         // Penalize a mismatch in either direction: a remix when the plain
         // song was requested, or the plain song when a remix was requested.
         if contains_word(&track_noise_source, word) != contains_word(&want_noise_source, word) {
@@ -260,13 +274,6 @@ pub fn duration_score(delta_secs: f32) -> f32 {
     } else {
         0.0
     }
-}
-
-pub fn exact_duration_match(duration_secs: Option<f32>, actual_duration_secs: Option<f32>) -> bool {
-    matches!(
-        (duration_secs, actual_duration_secs),
-        (Some(want), Some(actual)) if (actual - want).abs() <= EXACT_DURATION_MATCH_SECS
-    )
 }
 
 pub fn can_use_title_only_fallback(title: &str) -> bool {
@@ -308,67 +315,164 @@ pub fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by:
 /// Match confidence, ordered weakest first so `Ord` reflects strength.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProviderMatchTier {
-    /// Only an exact playtime backs the candidate; weakest evidence.
-    LooseDuration,
     /// The title agrees but the artist names share no script, so the
     /// mismatch is inconclusive (e.g. "BTS" vs "방탄소년단").
     LooseIncomparableArtist,
-    /// Only the artist agrees (e.g. another song by the same artist).
-    LooseArtist,
     /// Title and artist both agree with the request.
     Strict,
 }
 
-pub fn provider_match_tier(
+/// Evaluates a candidate against the request, considering every credited
+/// artist of the track (structured collaborations such as
+/// ["Lil Moshpit", "Fleeky Bang"]) and every top-level comma/&-separated
+/// name in the requested artist string, returning the strongest tier.
+pub fn provider_match_tier_credits(
+    track_name: &str,
+    credited_artists: &[String],
+    title: &str,
+    artist: &str,
+    matched_by: &str,
+) -> Option<ProviderMatchTier> {
+    let mut want_candidates = vec![artist.to_string()];
+    for piece in split_top_level_credits(artist) {
+        if !want_candidates.contains(&piece) {
+            want_candidates.push(piece);
+        }
+    }
+
+    let mut best: Option<ProviderMatchTier> = None;
+    for credit in credited_artists {
+        for want in &want_candidates {
+            let tier = provider_match_tier_pair(track_name, credit, title, want, matched_by);
+            if tier > best {
+                best = tier;
+            }
+        }
+    }
+    best
+}
+
+/// Single-credit convenience wrapper around [`provider_match_tier_credits`],
+/// used by unit tests.
+#[cfg(test)]
+fn provider_match_tier(
     track_name: &str,
     artist_name: &str,
     title: &str,
     artist: &str,
     matched_by: &str,
-    duration_pair: Option<(f32, f32)>,
+) -> Option<ProviderMatchTier> {
+    provider_match_tier_credits(
+        track_name,
+        &[artist_name.to_string()],
+        title,
+        artist,
+        matched_by,
+    )
+}
+
+/// Splits a raw requested-artist string on top-level (outside brackets)
+/// list separators. Returns an empty vec when there is nothing to split,
+/// so single names are never fragmented.
+fn split_top_level_credits(value: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' | '&' | ';' if depth == 0 => parts.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
+        }
+    }
+    parts.push(current);
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+    parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn provider_match_tier_pair(
+    track_name: &str,
+    artist_name: &str,
+    title: &str,
+    artist: &str,
+    matched_by: &str,
 ) -> Option<ProviderMatchTier> {
     let want_title = simplify(title);
-    let want_artist = normalize(artist);
     let track_title = simplify(track_name);
-    let track_artist = normalize(artist_name);
+    // Featured credits are not part of the artist's identity ("지코 (Feat.
+    // 아이유)" is still 지코), so drop them before comparing.
+    let want_artist = strip_featured_credits(&normalize(artist));
+    let track_artist = strip_featured_credits(&normalize(artist_name));
 
     let title_similarity = similarity(&want_title, &track_title);
+    // Character similarity is meaningless for very short names ("db" vs
+    // "dbsk" scores 0.5), so it only counts when both names are long enough.
+    let similarity_usable = char_count(&want_artist) >= 4 && char_count(&track_artist) >= 4;
     let artist_similarity = if want_artist.is_empty() {
         1.0
-    } else {
+    } else if similarity_usable {
         similarity(&want_artist, &track_artist)
+    } else {
+        0.0
     };
-    let artist_contains = !want_artist.is_empty()
-        && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+    // Component-level identity: "아이유 (IU)" yields the components
+    // {"아이유", "iu"}, so a request for "IU" matches exactly, while
+    // "BTS Tribute Band", "BTS Piano" or "BTS 피아노" never yield a
+    // component equal to "bts".
+    let artist_contains = !want_artist.is_empty() && {
+        let want_components = artist_components(artist);
+        let track_components = artist_components(artist_name);
+        want_components
+            .iter()
+            .any(|component| track_components.contains(component))
+    };
     let artist_agrees = want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains;
-    let artist_comparable = artists_comparable(&want_artist, &track_artist);
-    let exact_duration = duration_pair
-        .map(|(want, actual)| exact_duration_match(Some(want), Some(actual)))
-        .unwrap_or(false);
+    let artist_comparable = scripts_comparable(&want_artist, &track_artist);
 
+    // Note: an exact playtime match is deliberately NOT accepted as
+    // evidence. Songs of similar length coincide within seconds all the
+    // time, and a comparable-script artist mismatch (e.g. "db." vs
+    // "Lil Poet") proves the candidate is a different song regardless of
+    // its duration.
+    //
+    // Known residual risk: on the title+artist search path, when the
+    // provider lists an artist only in a script the request does not share
+    // (e.g. "릴 포엣" with no Latin rendering), the mismatch cannot be
+    // proven without transliteration data, so a near-exact-title candidate
+    // may still be accepted as LooseIncomparableArtist. The title-only
+    // fallback rejects it because that search never saw the artist at all.
     match matched_by {
         "search:title" => {
-            if title_similarity < 0.8 {
-                None
-            } else if want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains {
-                Some(ProviderMatchTier::Strict)
-            } else if !artist_comparable {
-                Some(ProviderMatchTier::LooseIncomparableArtist)
-            } else if exact_duration {
-                Some(ProviderMatchTier::LooseDuration)
-            } else {
-                None
-            }
+            // The artist was not part of the search query, so candidates
+            // need the strongest artist evidence: the exact same name
+            // (after featured-credit stripping) or a near-exact spelling
+            // variant. Component/alias interpretation is deliberately not
+            // trusted here, because a bracket group cannot be proven to be
+            // a transliterated alias rather than a qualifier ("BTS
+            // (피아노)"), and "Mina" vs "Mika" (0.75) must not pass.
+            let strong_artist_evidence = want_artist.is_empty()
+                || want_artist == track_artist
+                || (similarity_usable && artist_similarity >= 0.8);
+            (title_similarity >= 0.8 && strong_artist_evidence).then_some(ProviderMatchTier::Strict)
         }
         _ => {
             if title_similarity >= 0.45 && artist_agrees {
                 Some(ProviderMatchTier::Strict)
-            } else if artist_similarity >= 0.45 {
-                Some(ProviderMatchTier::LooseArtist)
-            } else if title_similarity >= 0.45 && !artist_comparable {
+            } else if title_similarity >= 0.8 && !artist_comparable {
                 Some(ProviderMatchTier::LooseIncomparableArtist)
-            } else if title_similarity >= 0.8 && exact_duration {
-                Some(ProviderMatchTier::LooseDuration)
             } else {
                 None
             }
@@ -376,10 +480,107 @@ pub fn provider_match_tier(
     }
 }
 
-/// Returns true when the two normalized artist names share at least one
-/// script family, meaning a low character similarity is evidence of an
-/// actual mismatch rather than a transliteration difference.
-fn artists_comparable(a: &str, b: &str) -> bool {
+fn char_count(value: &str) -> usize {
+    value.chars().filter(|ch| !ch.is_whitespace()).count()
+}
+
+/// Cuts a normalized artist name at the first featured-credit marker:
+/// "지코 feat 아이유" becomes "지코". A leading marker token is kept so a
+/// name like "FT Island" is not emptied.
+fn strip_featured_credits(value: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for token in value.split_whitespace() {
+        if !kept.is_empty() && matches!(token, "feat" | "featuring" | "ft") {
+            break;
+        }
+        kept.push(token);
+    }
+    kept.join(" ")
+}
+
+/// Splits a raw artist string into normalized identity components.
+///
+/// A bracket group becomes a standalone alias component only when its
+/// script differs from the main name ("아이유 (IU)" → ["아이유", "iu"]);
+/// a same-script bracket group is a qualifier and stays attached
+/// ("BTS (Piano)" → ["bts piano"]), and "(feat. …)" credits are dropped.
+/// Names are never split on punctuation, so "AC/DC" or "Tyler, The
+/// Creator" cannot fragment into lookalike components. Component equality
+/// therefore proves identity while derivative act names cannot match.
+fn artist_components(raw: &str) -> Vec<String> {
+    let mut main_raw = String::new();
+    let mut bracket_groups: Vec<String> = Vec::new();
+    let mut bracket = String::new();
+    let mut depth = 0usize;
+
+    for ch in raw.chars() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                if depth > 1 {
+                    bracket.push(ch);
+                }
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    bracket_groups.push(std::mem::take(&mut bracket));
+                } else {
+                    bracket.push(ch);
+                }
+            }
+            _ if depth > 0 => bracket.push(ch),
+            _ => main_raw.push(ch),
+        }
+    }
+    if !bracket.is_empty() {
+        bracket_groups.push(bracket);
+    }
+
+    let mut main_component = strip_featured_credits(&normalize(&main_raw));
+    let mut aliases: Vec<String> = Vec::new();
+    for group in bracket_groups {
+        let cleaned = normalize(&group);
+        if cleaned.is_empty() || is_featured_credit(&cleaned) {
+            continue;
+        }
+        if !main_component.is_empty() && !scripts_comparable(&main_component, &cleaned) {
+            let alias = strip_featured_credits(&cleaned);
+            if !alias.is_empty() && !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        } else {
+            // Same-script bracket content is a qualifier, not an alias;
+            // keep it inside the identity so it can never match the bare
+            // name.
+            if !main_component.is_empty() {
+                main_component.push(' ');
+            }
+            main_component.push_str(&cleaned);
+        }
+    }
+
+    let mut components = Vec::new();
+    if !main_component.is_empty() {
+        components.push(main_component);
+    }
+    components.extend(aliases);
+    components
+}
+
+/// Detects a bracket group that is a featured credit rather than an
+/// identity, e.g. "(feat. 아이유)" or "(with Halsey)".
+fn is_featured_credit(normalized: &str) -> bool {
+    matches!(
+        normalized.split_whitespace().next(),
+        Some("feat" | "featuring" | "ft" | "with")
+    )
+}
+
+/// Returns true when the two normalized names share at least one script
+/// family, meaning a low character similarity is evidence of an actual
+/// mismatch rather than a transliteration difference.
+fn scripts_comparable(a: &str, b: &str) -> bool {
     const LATIN: u8 = 1 << 0;
     const HANGUL: u8 = 1 << 1;
     const HAN: u8 = 1 << 2;
@@ -603,7 +804,6 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title+artist",
-                None,
             ),
             None
         );
@@ -618,7 +818,6 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title+artist",
-                None,
             ),
             Some(ProviderMatchTier::Strict)
         );
@@ -629,14 +828,15 @@ mod tests {
                 "밤편지",
                 "아이유",
                 "search:title+artist",
-                None,
             ),
             Some(ProviderMatchTier::Strict)
         );
     }
 
     #[test]
-    fn provider_match_tier_keeps_artist_only_match_as_loose() {
+    fn provider_match_tier_rejects_same_artist_different_song() {
+        // Same artist, same-script different title: a different song, not a
+        // rendering difference.
         assert_eq!(
             provider_match_tier(
                 "Again",
@@ -644,9 +844,225 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title+artist",
-                None,
             ),
-            Some(ProviderMatchTier::LooseArtist)
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_rejects_cross_script_title_even_with_matching_artist() {
+        // Deliberate tradeoff: with an agreeing artist but an untranslatable
+        // title ("Eight" vs "에잇"), there is no way to tell the requested
+        // song from any other song by the same artist, so it is rejected
+        // rather than risking another song's lyrics.
+        assert_eq!(
+            provider_match_tier(
+                "에잇 (Prod.&Feat. SUGA of BTS)",
+                "아이유 (IU)",
+                "Eight",
+                "IU",
+                "search:title+artist",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_rejects_tribute_and_noise_artists() {
+        // "BTS Tribute Band" token-contains "bts", but same-script extra
+        // tokens mark a different act rather than a transliterated alias.
+        assert_eq!(
+            provider_match_tier(
+                "Dynamite",
+                "BTS Tribute Band",
+                "Dynamite",
+                "BTS",
+                "search:title+artist",
+            ),
+            None
+        );
+        // Any same-script qualifier is rejected, not just a known blacklist.
+        assert_eq!(
+            provider_match_tier(
+                "Dynamite",
+                "BTS Piano",
+                "Dynamite",
+                "BTS",
+                "search:title+artist",
+            ),
+            None
+        );
+        // Cross-script qualifiers are no better: the qualifier stays inside
+        // the component, so it can never equal the requested name.
+        assert_eq!(
+            provider_match_tier("Dynamite", "BTS 피아노", "Dynamite", "BTS", "search:title",),
+            None
+        );
+        assert_eq!(
+            provider_match_tier("밤편지", "아이유 Piano", "밤편지", "아이유", "search:title",),
+            None
+        );
+        // A same-script bracket group is a qualifier, not an alias.
+        assert_eq!(
+            provider_match_tier("Dynamite", "BTS (Piano)", "Dynamite", "BTS", "search:title",),
+            None
+        );
+        // On the title-only path even a cross-script bracket group is not
+        // trusted as an alias, so translated qualifiers cannot bypass.
+        assert_eq!(
+            provider_match_tier(
+                "Dynamite",
+                "BTS (피아노)",
+                "Dynamite",
+                "BTS",
+                "search:title",
+            ),
+            None
+        );
+        assert_eq!(
+            provider_match_tier(
+                "밤편지",
+                "아이유 (Piano)",
+                "밤편지",
+                "아이유",
+                "search:title",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_does_not_fragment_punctuated_names() {
+        // "Tyler, The Creator" must not fragment into a component equal to
+        // a different artist named just "Tyler".
+        assert_eq!(
+            provider_match_tier(
+                "See You Again",
+                "Tyler, The Creator",
+                "See You Again",
+                "Tyler",
+                "search:title",
+            ),
+            None
+        );
+        // Punctuated proper nouns still match themselves.
+        assert_eq!(
+            provider_match_tier(
+                "Thunderstruck",
+                "AC/DC",
+                "Thunderstruck",
+                "AC/DC",
+                "search:title",
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_credits_matches_secondary_collaborators() {
+        // Bugs exposes structured artist credits; a request for the second
+        // credited artist must resolve (real-world collaboration flow).
+        let credits = vec!["Lil Moshpit".to_string(), "Fleeky Bang".to_string()];
+        assert_eq!(
+            provider_match_tier_credits(
+                "How We Came",
+                &credits,
+                "How We Came",
+                "Fleeky Bang",
+                "search:title",
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_credits_splits_requested_artist_list() {
+        // The request side may arrive as a joined list ("IU, ZICO"); each
+        // member counts against each credited artist.
+        let credits = vec!["아이유(IU)".to_string()];
+        assert_eq!(
+            provider_match_tier_credits(
+                "밤편지",
+                &credits,
+                "밤편지",
+                "IU, ZICO",
+                "search:title+artist",
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_requires_near_exact_artist_on_title_only_search() {
+        // Positional similarity 0.75 ("Mina" vs "Mika") is not identity
+        // evidence when the artist was never part of the search query.
+        assert_eq!(
+            provider_match_tier("Alive", "Mika", "Alive", "Mina", "search:title",),
+            None
+        );
+        // Near-exact spelling variants still pass.
+        assert_eq!(
+            provider_match_tier("Halo", "Beyonce", "Halo", "Beyoncé", "search:title",),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_ignores_featured_credits_in_artist_names() {
+        assert_eq!(
+            provider_match_tier(
+                "아무노래",
+                "지코 (Feat. 아이유)",
+                "아무노래",
+                "지코",
+                "search:title",
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_requires_artist_evidence_on_title_only_search() {
+        // The title-only fallback never sent the artist to the provider, so
+        // an artist listed only in another script (no Latin rendering) is
+        // not enough evidence; the real-world maybach./db. bug would
+        // otherwise recur whenever the provider omits the Latin name.
+        assert_eq!(
+            provider_match_tier(
+                "Maybach (feat. dsel)",
+                "릴 포엣",
+                "maybach.",
+                "db.",
+                "search:title",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_requires_token_boundary_for_artist_containment() {
+        // "db" is a substring of "dbsk entertainment" but not a whole token,
+        // so containment must not count as artist agreement.
+        assert_eq!(
+            provider_match_tier(
+                "Maybach",
+                "dbsk entertainment",
+                "Maybach",
+                "db",
+                "search:title",
+            ),
+            None
+        );
+        // Whole-token containment still counts.
+        assert_eq!(
+            provider_match_tier(
+                "밤편지",
+                "아이유 (IU)",
+                "밤편지",
+                "아이유",
+                "search:title+artist",
+            ),
+            Some(ProviderMatchTier::Strict)
         );
     }
 
@@ -661,7 +1077,6 @@ mod tests {
                 "Dynamite",
                 "BTS",
                 "search:title+artist",
-                None,
             ),
             Some(ProviderMatchTier::LooseIncomparableArtist)
         );
@@ -673,16 +1088,26 @@ mod tests {
                 "Dynamite",
                 "BTS",
                 "search:title+artist",
-                None,
             ),
             None
         );
     }
 
     #[test]
-    fn provider_match_tier_keeps_exact_duration_rescue_loose() {
-        // A duration coincidence alone must not allow walking through
-        // multiple wrong-artist candidates, so it stays Loose.
+    fn provider_match_tier_rejects_duration_coincidences() {
+        // Regression: Bugs served Lil Poet's "Maybach (feat. dsel)" for a
+        // request of "maybach." by "db." because an exact playtime match was
+        // accepted as evidence on the title-only search path.
+        assert_eq!(
+            provider_match_tier(
+                "Maybach (feat. dsel)",
+                "릴 포엣 (Lil Poet)",
+                "maybach.",
+                "db.",
+                "search:title",
+            ),
+            None
+        );
         assert_eq!(
             provider_match_tier(
                 "Follow My Lead",
@@ -690,9 +1115,8 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title+artist",
-                Some((201.0, 200.0)),
             ),
-            Some(ProviderMatchTier::LooseDuration)
+            None
         );
     }
 
@@ -707,7 +1131,6 @@ mod tests {
                 "Dearest",
                 "ハマサキアユミ",
                 "search:title+artist",
-                None,
             ),
             Some(ProviderMatchTier::LooseIncomparableArtist)
         );
@@ -719,7 +1142,6 @@ mod tests {
                 "Dearest",
                 "ハマサキアユミ",
                 "search:title+artist",
-                None,
             ),
             None
         );
@@ -736,7 +1158,6 @@ mod tests {
                 "Number Nine",
                 "9와 숫자들",
                 "search:title+artist",
-                None,
             ),
             Some(ProviderMatchTier::LooseIncomparableArtist)
         );
@@ -749,7 +1170,6 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title+artist",
-                None,
             ),
             None
         );
@@ -757,9 +1177,7 @@ mod tests {
 
     #[test]
     fn provider_match_tier_orders_confidence() {
-        assert!(ProviderMatchTier::Strict > ProviderMatchTier::LooseArtist);
-        assert!(ProviderMatchTier::LooseArtist > ProviderMatchTier::LooseIncomparableArtist);
-        assert!(ProviderMatchTier::LooseIncomparableArtist > ProviderMatchTier::LooseDuration);
+        assert!(ProviderMatchTier::Strict > ProviderMatchTier::LooseIncomparableArtist);
     }
 
     #[test]
@@ -771,7 +1189,6 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title",
-                None,
             ),
             None
         );
@@ -782,7 +1199,6 @@ mod tests {
                 "Follow My Lead",
                 "KIRBS",
                 "search:title",
-                None,
             ),
             Some(ProviderMatchTier::Strict)
         );
