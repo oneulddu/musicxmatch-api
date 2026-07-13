@@ -34,7 +34,7 @@ use logging::{
 };
 use matching::{
     artist_variants, can_use_title_only_fallback, exact_title_artist_match, is_acceptable_match,
-    is_acceptable_provider_match, normalize, score_provider_track, score_track,
+    normalize, provider_match_tier, score_provider_track, score_track, simplify,
     strip_lyrics_footer, title_variants, SearchableTrack,
 };
 use musixmatch::{Error as MxmError, Musixmatch, SortOrder, SubtitleFormat, Track, TrackId};
@@ -2559,42 +2559,69 @@ where
         return Err(not_found_error());
     }
 
-    let mut candidates = tracks_by_id
+    let mut accepted = tracks_by_id
         .into_values()
-        .map(|track| {
+        .filter_map(|track| {
+            let actual_duration_secs = use_duration_for_acceptance
+                .then(|| {
+                    track
+                        .duration_ms()
+                        .map(|actual_ms| actual_ms as f32 / 1000.0)
+                })
+                .flatten();
+            let tier = provider_match_tier(
+                track.name(),
+                track.artist(),
+                title,
+                artist,
+                matched_by,
+                duration_secs.zip(actual_duration_secs),
+            )?;
             let score = score_provider_track(&track, title, artist, duration_secs);
-            (track, score)
+            Some((track, score, tier))
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|(_, left_score), (_, right_score)| {
-        right_score
-            .partial_cmp(left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    candidates.retain(|(track, _)| {
-        let actual_duration_secs = use_duration_for_acceptance
-            .then(|| {
-                track
-                    .duration_ms()
-                    .map(|actual_ms| actual_ms as f32 / 1000.0)
-            })
-            .flatten();
-        is_acceptable_provider_match(
-            track.name(),
-            track.artist(),
-            title,
-            artist,
-            matched_by,
-            duration_secs.zip(actual_duration_secs),
-        )
-    });
 
-    if candidates.is_empty() {
+    // Order by score, then by match confidence, then by id so that ties are
+    // deterministic instead of following HashMap iteration order.
+    accepted.sort_by(
+        |(left, left_score, left_tier), (right, right_score, right_tier)| {
+            right_score
+                .partial_cmp(left_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(right_tier.cmp(left_tier))
+                .then(left.id().cmp(&right.id()))
+        },
+    );
+
+    // The top-scored candidate wins. Later candidates are only kept as
+    // lyrics-availability fallbacks when they are duplicates of the winning
+    // song (e.g. album re-releases or remix entries of the same title);
+    // walking into any other candidate can serve a different song's lyrics.
+    let top_identity = accepted
+        .first()
+        .map(|(track, _, _)| (simplify(track.name()), normalize(track.artist())));
+    let tracks = accepted
+        .into_iter()
+        .enumerate()
+        .filter(|(index, (track, _, _))| {
+            *index == 0
+                || top_identity
+                    .as_ref()
+                    .is_some_and(|(top_title, top_artist)| {
+                        simplify(track.name()) == *top_title
+                            && normalize(track.artist()) == *top_artist
+                    })
+        })
+        .map(|(_, (track, _, _))| track)
+        .collect::<Vec<_>>();
+
+    if tracks.is_empty() {
         return Err(not_found_error());
     }
 
     Ok(ProviderTrackResolution {
-        tracks: candidates.into_iter().map(|(track, _)| track).collect(),
+        tracks,
         matched_by,
         search_variants: attempted_variants,
     })
@@ -3047,6 +3074,185 @@ mod tests {
             .await
             .expect("response body should be readable");
         serde_json::from_slice(&bytes).expect("response body should be valid json")
+    }
+
+    struct StubTrackSearch {
+        tracks: Vec<GenieTrack>,
+    }
+
+    impl ProviderTrackSearch<GenieTrack, GenieError> for StubTrackSearch {
+        async fn search_provider_tracks(
+            &self,
+            _title: Option<&str>,
+            _artist: Option<&str>,
+        ) -> Result<Vec<GenieTrack>, GenieError> {
+            Ok(self.tracks.clone())
+        }
+    }
+
+    fn stub_track(track_id: u64, track_name: &str, artist_name: &str) -> GenieTrack {
+        GenieTrack {
+            track_id,
+            track_name: track_name.to_string(),
+            artist_name: artist_name.to_string(),
+            duration_ms: None,
+        }
+    }
+
+    fn stub_track_with_duration(
+        track_id: u64,
+        track_name: &str,
+        artist_name: &str,
+        duration_ms: u64,
+    ) -> GenieTrack {
+        GenieTrack {
+            duration_ms: Some(duration_ms),
+            ..stub_track(track_id, track_name, artist_name)
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_never_falls_through_to_wrong_artist() {
+        // Regression: Genie served Chipmunk's lyrics for KIRBS' request when
+        // the correct track had no lyrics available.
+        let client = StubTrackSearch {
+            tracks: vec![
+                stub_track(1, "follow my lead", "Kirbs"),
+                stub_track(2, "Follow My Lead (Feat. Eric B.)", "Chipmunk"),
+                stub_track(3, "Follow My Lead (Feat. Robin Thicke)", "50 Cent"),
+            ],
+        };
+
+        let resolution =
+            resolve_provider_tracks(&client, "Follow My Lead", "KIRBS", None, true, || {
+                GenieError::NotFound
+            })
+            .await
+            .expect("the matching-artist track should resolve");
+
+        let ids: Vec<u64> = resolution
+            .tracks
+            .iter()
+            .map(|track| track.track_id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_rejects_when_only_wrong_artists_match() {
+        let client = StubTrackSearch {
+            tracks: vec![stub_track(2, "Follow My Lead (Feat. Eric B.)", "Chipmunk")],
+        };
+
+        let result =
+            resolve_provider_tracks(&client, "Follow My Lead", "KIRBS", None, true, || {
+                GenieError::NotFound
+            })
+            .await;
+
+        assert!(matches!(result, Err(GenieError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_keeps_cross_script_duplicates_original_first() {
+        // Genie lists K-pop artists in Korean; duplicates of the same song
+        // stay as fallbacks while the plain version outranks remixes.
+        let client = StubTrackSearch {
+            tracks: vec![
+                stub_track(1, "dynamite (retro remix)", "방탄소년단"),
+                stub_track(2, "dynamite", "방탄소년단"),
+                stub_track(3, "dynamite", "방탄소년단"),
+            ],
+        };
+
+        let resolution = resolve_provider_tracks(&client, "Dynamite", "BTS", None, true, || {
+            GenieError::NotFound
+        })
+        .await
+        .expect("cross-script artist should resolve as a loose match");
+
+        assert_eq!(resolution.tracks.len(), 3);
+        assert_ne!(
+            resolution.tracks[0].track_id, 1,
+            "plain versions should rank first"
+        );
+        assert_eq!(
+            resolution.tracks[2].track_id, 1,
+            "the remix should stay last"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_limits_loose_matches_to_one_song() {
+        // Artist-only agreement must not walk across different songs.
+        let client = StubTrackSearch {
+            tracks: vec![
+                stub_track(1, "Again", "Kirbs"),
+                stub_track(2, "Older", "Kirbs"),
+            ],
+        };
+
+        let resolution =
+            resolve_provider_tracks(&client, "Follow My Lead", "KIRBS", None, true, || {
+                GenieError::NotFound
+            })
+            .await
+            .expect("a same-artist track should remain as a last resort");
+
+        assert_eq!(resolution.tracks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_prefers_high_score_over_strict_tier() {
+        // "BTS Tribute Band" contains "bts", which makes it a Strict match on
+        // paper; the higher-scored real artist must win, and the tribute act
+        // must not even survive as a lyrics-availability fallback.
+        let client = StubTrackSearch {
+            tracks: vec![
+                stub_track(1, "Dynamite", "방탄소년단"),
+                stub_track(2, "Dynamite", "BTS Tribute Band"),
+            ],
+        };
+
+        let resolution = resolve_provider_tracks(&client, "Dynamite", "BTS", None, true, || {
+            GenieError::NotFound
+        })
+        .await
+        .expect("the real artist should resolve");
+
+        let ids: Vec<u64> = resolution
+            .tracks
+            .iter()
+            .map(|track| track.track_id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_tracks_breaks_score_ties_by_confidence() {
+        // With identical scores, the inconclusive cross-script artist must be
+        // chosen deterministically over a duration-only coincidence, and the
+        // wrong-artist candidate must not survive as a fallback.
+        let client = StubTrackSearch {
+            tracks: vec![
+                stub_track_with_duration(1, "Dynamite", "Sigrid", 199_000),
+                stub_track_with_duration(2, "Dynamite", "방탄소년단", 199_000),
+            ],
+        };
+
+        let resolution =
+            resolve_provider_tracks(&client, "Dynamite", "BTS", Some(199.0), true, || {
+                GenieError::NotFound
+            })
+            .await
+            .expect("the cross-script artist should resolve");
+
+        let ids: Vec<u64> = resolution
+            .tracks
+            .iter()
+            .map(|track| track.track_id)
+            .collect();
+        assert_eq!(ids, vec![2]);
     }
 
     #[tokio::test]

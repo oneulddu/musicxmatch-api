@@ -199,6 +199,10 @@ fn score_basic_match(
 ) -> f32 {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
+    // Keep bracketed/suffixed words (e.g. "(Retro Remix)") visible for the
+    // noise check below; `simplify` would strip them.
+    let want_noise_source = format!("{} {}", normalize(title), want_artist);
+    let track_noise_source = format!("{} {}", normalize(track_title), normalize(track_artist));
     let track_title = simplify(track_title);
     let track_artist = normalize(track_artist);
 
@@ -228,7 +232,9 @@ fn score_basic_match(
         "remix",
         "tribute",
     ] {
-        if contains_word(&track_title, word) || contains_word(&track_artist, word) {
+        // Penalize a mismatch in either direction: a remix when the plain
+        // song was requested, or the plain song when a remix was requested.
+        if contains_word(&track_noise_source, word) != contains_word(&want_noise_source, word) {
             score -= NOISE_PENALTY;
         }
     }
@@ -299,14 +305,28 @@ pub fn is_acceptable_match(track: &Track, title: &str, artist: &str, matched_by:
     }
 }
 
-pub fn is_acceptable_provider_match(
+/// Match confidence, ordered weakest first so `Ord` reflects strength.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProviderMatchTier {
+    /// Only an exact playtime backs the candidate; weakest evidence.
+    LooseDuration,
+    /// The title agrees but the artist names share no script, so the
+    /// mismatch is inconclusive (e.g. "BTS" vs "방탄소년단").
+    LooseIncomparableArtist,
+    /// Only the artist agrees (e.g. another song by the same artist).
+    LooseArtist,
+    /// Title and artist both agree with the request.
+    Strict,
+}
+
+pub fn provider_match_tier(
     track_name: &str,
     artist_name: &str,
     title: &str,
     artist: &str,
     matched_by: &str,
     duration_pair: Option<(f32, f32)>,
-) -> bool {
+) -> Option<ProviderMatchTier> {
     let want_title = simplify(title);
     let want_artist = normalize(artist);
     let track_title = simplify(track_name);
@@ -320,24 +340,83 @@ pub fn is_acceptable_provider_match(
     };
     let artist_contains = !want_artist.is_empty()
         && (track_artist.contains(&want_artist) || want_artist.contains(&track_artist));
+    let artist_agrees = want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains;
+    let artist_comparable = artists_comparable(&want_artist, &track_artist);
     let exact_duration = duration_pair
         .map(|(want, actual)| exact_duration_match(Some(want), Some(actual)))
         .unwrap_or(false);
 
     match matched_by {
         "search:title" => {
-            title_similarity >= 0.8
-                && (want_artist.is_empty()
-                    || artist_similarity >= 0.35
-                    || artist_contains
-                    || exact_duration)
+            if title_similarity < 0.8 {
+                None
+            } else if want_artist.is_empty() || artist_similarity >= 0.35 || artist_contains {
+                Some(ProviderMatchTier::Strict)
+            } else if !artist_comparable {
+                Some(ProviderMatchTier::LooseIncomparableArtist)
+            } else if exact_duration {
+                Some(ProviderMatchTier::LooseDuration)
+            } else {
+                None
+            }
         }
         _ => {
-            title_similarity >= 0.45
-                || artist_similarity >= 0.45
-                || (title_similarity >= 0.8 && exact_duration)
+            if title_similarity >= 0.45 && artist_agrees {
+                Some(ProviderMatchTier::Strict)
+            } else if artist_similarity >= 0.45 {
+                Some(ProviderMatchTier::LooseArtist)
+            } else if title_similarity >= 0.45 && !artist_comparable {
+                Some(ProviderMatchTier::LooseIncomparableArtist)
+            } else if title_similarity >= 0.8 && exact_duration {
+                Some(ProviderMatchTier::LooseDuration)
+            } else {
+                None
+            }
         }
     }
+}
+
+/// Returns true when the two normalized artist names share at least one
+/// script family, meaning a low character similarity is evidence of an
+/// actual mismatch rather than a transliteration difference.
+fn artists_comparable(a: &str, b: &str) -> bool {
+    const LATIN: u8 = 1 << 0;
+    const HANGUL: u8 = 1 << 1;
+    const HAN: u8 = 1 << 2;
+    const HIRAGANA: u8 = 1 << 3;
+    const KATAKANA: u8 = 1 << 4;
+    const OTHER: u8 = 1 << 5;
+
+    fn script_families(value: &str) -> u8 {
+        let mut mask = 0u8;
+        // Digits are script-neutral: "9와 숫자들" and "9 and the Numbers"
+        // share only the digit, which proves nothing about the script.
+        for ch in value
+            .chars()
+            .filter(|ch| ch.is_alphanumeric() && !ch.is_ascii_digit())
+        {
+            mask |= match ch {
+                ch if ch.is_ascii() => LATIN,
+                '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' => {
+                    HANGUL
+                }
+                '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}' => HAN,
+                '\u{3040}'..='\u{309F}' => HIRAGANA,
+                '\u{30A0}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' => KATAKANA,
+                _ => OTHER,
+            };
+        }
+        mask
+    }
+
+    let a_mask = script_families(a);
+    let b_mask = script_families(b);
+    // Without script evidence on one side (digits-only or empty names),
+    // never excuse a similarity mismatch as a transliteration difference.
+    if a_mask == 0 || b_mask == 0 {
+        return true;
+    }
+    a_mask & b_mask != 0
 }
 
 pub fn strip_lyrics_footer(value: &str) -> String {
@@ -458,5 +537,254 @@ mod tests {
         };
 
         assert_eq!(score_track(&track, "Alive", "Artist", None), 125.0);
+    }
+
+    #[test]
+    fn noise_penalty_applies_to_bracketed_remix_titles() {
+        let original = score_basic_match("Dynamite", "BTS", "Dynamite", "방탄소년단", None, None);
+        let remix = score_basic_match(
+            "Dynamite",
+            "BTS",
+            "Dynamite (Retro Remix)",
+            "방탄소년단",
+            None,
+            None,
+        );
+        assert!(original > remix, "original={original} remix={remix}");
+    }
+
+    #[test]
+    fn noise_penalty_skipped_when_request_also_mentions_remix() {
+        let remix_request = score_basic_match(
+            "Dynamite (Retro Remix)",
+            "BTS",
+            "Dynamite (Retro Remix)",
+            "방탄소년단",
+            None,
+            None,
+        );
+        let plain_request =
+            score_basic_match("Dynamite", "BTS", "Dynamite", "방탄소년단", None, None);
+        assert_eq!(remix_request, plain_request);
+    }
+
+    #[test]
+    fn requested_remix_outranks_plain_version() {
+        let remix_track = score_basic_match(
+            "Dynamite (Retro Remix)",
+            "BTS",
+            "Dynamite (Retro Remix)",
+            "방탄소년단",
+            None,
+            None,
+        );
+        let plain_track = score_basic_match(
+            "Dynamite (Retro Remix)",
+            "BTS",
+            "Dynamite",
+            "방탄소년단",
+            None,
+            None,
+        );
+        assert!(
+            remix_track > plain_track,
+            "remix={remix_track} plain={plain_track}"
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_rejects_same_title_different_artist() {
+        // Regression: Genie returned Chipmunk's lyrics for KIRBS' request
+        // because a title-only match was accepted on the title+artist path.
+        assert_eq!(
+            provider_match_tier(
+                "Follow My Lead (Feat. Eric B.)",
+                "Chipmunk",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title+artist",
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_accepts_matching_title_and_artist_as_strict() {
+        assert_eq!(
+            provider_match_tier(
+                "follow my lead",
+                "Kirbs",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+        assert_eq!(
+            provider_match_tier(
+                "밤편지",
+                "아이유 (IU)",
+                "밤편지",
+                "아이유",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_keeps_artist_only_match_as_loose() {
+        assert_eq!(
+            provider_match_tier(
+                "Again",
+                "Kirbs",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::LooseArtist)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_allows_cross_script_artist_as_loose() {
+        // Genie often lists K-pop artists only in Korean; "BTS" and
+        // "방탄소년단" share no script, so the mismatch is not conclusive.
+        assert_eq!(
+            provider_match_tier(
+                "Dynamite",
+                "방탄소년단",
+                "Dynamite",
+                "BTS",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::LooseIncomparableArtist)
+        );
+        // Same-script artists that do not match stay rejected.
+        assert_eq!(
+            provider_match_tier(
+                "Dynamite",
+                "Sigrid",
+                "Dynamite",
+                "BTS",
+                "search:title+artist",
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_keeps_exact_duration_rescue_loose() {
+        // A duration coincidence alone must not allow walking through
+        // multiple wrong-artist candidates, so it stays Loose.
+        assert_eq!(
+            provider_match_tier(
+                "Follow My Lead",
+                "Someone Else",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title+artist",
+                Some((201.0, 200.0)),
+            ),
+            Some(ProviderMatchTier::LooseDuration)
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_treats_japanese_transliterations_as_loose() {
+        // Same artist written in kanji+hiragana vs katakana shares no
+        // script family, so the mismatch is not conclusive.
+        assert_eq!(
+            provider_match_tier(
+                "Dearest",
+                "浜崎あゆみ",
+                "Dearest",
+                "ハマサキアユミ",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::LooseIncomparableArtist)
+        );
+        // Two different artists in the same script stay rejected.
+        assert_eq!(
+            provider_match_tier(
+                "Dearest",
+                "アイミョン",
+                "Dearest",
+                "ハマサキアユミ",
+                "search:title+artist",
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_ignores_digits_when_comparing_scripts() {
+        // "9와 숫자들" vs "9 and the Numbers": the shared digit must not make
+        // the two names count as the same script.
+        assert_eq!(
+            provider_match_tier(
+                "Number Nine",
+                "9 and the Numbers",
+                "Number Nine",
+                "9와 숫자들",
+                "search:title+artist",
+                None,
+            ),
+            Some(ProviderMatchTier::LooseIncomparableArtist)
+        );
+        // Digits-only artist names carry no script evidence, so a mismatch
+        // stays a mismatch.
+        assert_eq!(
+            provider_match_tier(
+                "Follow My Lead",
+                "81",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title+artist",
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_match_tier_orders_confidence() {
+        assert!(ProviderMatchTier::Strict > ProviderMatchTier::LooseArtist);
+        assert!(ProviderMatchTier::LooseArtist > ProviderMatchTier::LooseIncomparableArtist);
+        assert!(ProviderMatchTier::LooseIncomparableArtist > ProviderMatchTier::LooseDuration);
+    }
+
+    #[test]
+    fn provider_match_tier_title_only_search_stays_strict() {
+        assert_eq!(
+            provider_match_tier(
+                "Follow My Lead",
+                "Chipmunk",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title",
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            provider_match_tier(
+                "Follow My Lead",
+                "Kirbs",
+                "Follow My Lead",
+                "KIRBS",
+                "search:title",
+                None,
+            ),
+            Some(ProviderMatchTier::Strict)
+        );
     }
 }
